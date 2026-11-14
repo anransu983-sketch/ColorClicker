@@ -4,6 +4,7 @@ import android.content.Context
 import android.content.Intent
 import android.content.pm.PackageManager
 import android.net.Uri
+import android.provider.Settings
 import androidx.core.content.FileProvider
 import androidx.core.content.pm.PackageInfoCompat
 import java.io.File
@@ -64,6 +65,7 @@ object Updater {
             }
             if (conn.responseCode != 200) return "下载失败：HTTP ${conn.responseCode}"
             val total = conn.contentLengthLong
+            AppLog.i("启动", "开始下载更新 ${info.versionName}（共 ${if (total > 0) "${total / 1024 / 1024} MB" else "大小未知"}）")
             var done = 0L
             conn.inputStream.use { input ->
                 FileOutputStream(out).use { output ->
@@ -77,13 +79,28 @@ object Updater {
                     }
                 }
             }
-            if (total > 0 && out.length() < total) return "下载不完整，请重试"
+            if (total > 0 && out.length() != total) {
+                AppLog.e("启动", "更新下载不完整：已下 ${out.length()} / 应下 $total 字节")
+                return "下载不完整（${out.length() / 1024 / 1024} / ${total / 1024 / 1024} MB），请重试"
+            }
+            AppLog.i("启动", "更新下载完成：${out.length() / 1024 / 1024} MB")
+            // 没开「安装未知应用」时调安装器会被系统拦下，先带她去开
+            if (!ctx.packageManager.canRequestPackageInstalls()) {
+                AppLog.w("启动", "未授予「安装未知应用」权限，正在打开设置页")
+                val settings = Intent(Settings.ACTION_MANAGE_UNKNOWN_APP_SOURCES, Uri.parse("package:${ctx.packageName}")).apply {
+                    addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                }
+                ctx.startActivity(settings)
+                return "请在设置里允许「安装未知应用」，再点更新"
+            }
             val uri: Uri = FileProvider.getUriForFile(ctx, "${ctx.packageName}.fileprovider", out)
             val intent = Intent(Intent.ACTION_VIEW).apply {
                 setDataAndType(uri, "application/vnd.android.package-archive")
                 addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_GRANT_READ_URI_PERMISSION)
             }
+            AppLog.i("启动", "正在调起安装器")
             ctx.startActivity(intent)
+            AppLog.i("启动", "安装器已调起")
             null
         } catch (e: Exception) {
             AppLog.e("启动", "下载更新失败", e)

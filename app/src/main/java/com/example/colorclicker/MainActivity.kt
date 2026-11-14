@@ -163,6 +163,7 @@ class MainActivity : ComponentActivity() {
                             scope.launch(kotlinx.coroutines.Dispatchers.IO) {
                                 val err = Updater.downloadAndInstall(ctx, info) { p -> updateProgress = p }
                                 if (err != null) { updateError = err; updateProgress = -1 }
+                                else { updateProgress = -1; updateInfo = null }   // 安装器已调起，关掉对话框
                             }
                         },
                         enabled = updateProgress < 0
