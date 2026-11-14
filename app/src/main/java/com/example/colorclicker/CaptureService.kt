@@ -38,6 +38,10 @@ object ScreenGrabber {
     @Volatile var reader: ImageReader? = null
     private var last: Bitmap? = null
 
+    /** 丢弃上一帧（截屏尺寸重建后旧帧方向不对，不能再用） */
+    @Synchronized
+    fun reset() { last = null }
+
     @Synchronized
     fun grab(): Bitmap? {
         val img = reader?.acquireLatestImage() ?: return last   // 画面没变化时沿用上一帧
@@ -59,6 +63,26 @@ class CaptureService : Service() {
     private var picker: View? = null
     private val handler = Handler(Looper.getMainLooper())
     private lateinit var wm: WindowManager
+    private var capW = 0
+    private var capH = 0
+
+    /** 截屏画面跟随当前方向：尺寸变了就重建 VirtualDisplay + ImageReader，否则横屏游戏会被竖屏截屏拍错 */
+    private fun ensureCaptureSize(w: Int, h: Int): Boolean {
+        if (ScreenGrabber.reader != null && capW == w && capH == h) return false
+        display?.release()
+        ScreenGrabber.reader?.close(); ScreenGrabber.reader = null
+        ScreenGrabber.reset()
+        val dpi = resources.displayMetrics.densityDpi
+        val reader = ImageReader.newInstance(w, h, PixelFormat.RGBA_8888, 2)
+        ScreenGrabber.reader = reader
+        display = projection?.createVirtualDisplay(
+            "cap", w, h, dpi,
+            DisplayManager.VIRTUAL_DISPLAY_FLAG_AUTO_MIRROR, reader.surface, null, null
+        )
+        capW = w; capH = h
+        AppLog.i("截图", "截屏画面已重建为 ${w}x${h}（跟随当前方向）")
+        return true
+    }
 
     override fun onBind(i: Intent?): IBinder? = null
 
@@ -96,6 +120,7 @@ class CaptureService : Service() {
             "cap", b.width(), b.height(), dpi,
             DisplayManager.VIRTUAL_DISPLAY_FLAG_AUTO_MIRROR, reader.surface, null, null
         )
+        capW = b.width(); capH = b.height()
         showOverlay()
         return START_NOT_STICKY
     }
@@ -145,11 +170,13 @@ class CaptureService : Service() {
         wm.addView(bar, lp); overlay = bar
     }
 
-    /** 先隐藏工具栏，截一帧干净的画面，再弹出冻结截图选择器 */
+    /** 先隐藏工具栏，按当前方向重建截屏，截一帧干净的画面，再弹出冻结截图选择器 */
     private fun startPick(bar: View, mode: String) {
         if (Runner.isRunning()) { toast("请先停止运行（点 ■）"); return }
         if (picker != null) return
         bar.visibility = View.INVISIBLE
+        val b0 = wm.currentWindowMetrics.bounds
+        val rebuilt = ensureCaptureSize(b0.width(), b0.height())
         handler.postDelayed({
             val bmp = ScreenGrabber.grab()
             if (bmp == null) {
@@ -189,18 +216,20 @@ class CaptureService : Service() {
                 layoutInDisplayCutoutMode = WindowManager.LayoutParams.LAYOUT_IN_DISPLAY_CUTOUT_MODE_ALWAYS
             }
             wm.addView(v, lp); picker = v
-        }, 350)
+        }, if (rebuilt) 600 else 350)
     }
 
     private fun onPicked(bmp: Bitmap, color: String?, rect: List<Int>?) {
         if (color != null) {
             Pick.color = color
+            Pick.lastKind = "color"
             AppLog.i("截图", "取色 $color（已复制到剪贴板）")
             (getSystemService(CLIPBOARD_SERVICE) as ClipboardManager)
                 .setPrimaryClip(ClipData.newPlainText("color", color))
             toast("已取色 $color（已复制）。新建规则时点「使用最近取色」")
         } else if (rect != null) {
             Pick.rect = rect
+            Pick.lastKind = "region"
             AppLog.i("截图", "框选 ${rect.joinToString(",")}，已保存为模板图")
             val crop = Bitmap.createBitmap(bmp, rect[0], rect[1], rect[2], rect[3])
             val f = File(filesDir, "crop_${System.currentTimeMillis()}.png")

@@ -1,4 +1,4 @@
-# 图色点击器 ColorClicker (v0.2)
+# 图色点击器 ColorClicker (v0.4)
 
 [![Build APK](https://github.com/anransu983-sketch/ColorClicker/actions/workflows/build.yml/badge.svg)](https://github.com/anransu983-sketch/ColorClicker/actions/workflows/build.yml)
 
@@ -13,7 +13,7 @@ Kotlin + Compose + OpenCV。截屏(MediaProjection) -> 找色/找图 -> 无障�
 3. App 内依次：开启无障碍 → 授权悬浮窗 → 授权截屏并启动。
 4. 添加规则，回到目标 App，点悬浮窗 ▶ 开始 / ■ 停止。
 
-## 取色 / 框选（v0.2）
+## 取色 / 框选（v0.4）
 悬浮工具栏：▶ 开始/停止（可拖动），取色，框选。
 取色/框选会冻结当前画面，取色后结果保存在 App 内；新建规则时点“使用最近取色 / 使用最近框选”即可。
 框选还会把选中区域裁成模板图，可直接作为找图模板。运行中不能取色，需先点 ■ 停止。

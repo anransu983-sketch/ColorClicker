@@ -110,6 +110,7 @@ class MainActivity : ComponentActivity() {
         }
         if (showAdd) AddDialog({ showAdd = false }) {
             rules.add(it); persist()
+            Pick.clear()   // 这次取色/框选用掉了，下次打开不再重复带入
             AppLog.i("规则", "新建规则「${it.name}」（${if (it.type == "color") "找色 ${it.colorHex} ±${it.tolerance}" else "找图 相似度≥${it.threshold}"}）")
             showAdd = false
         }
@@ -120,13 +121,14 @@ class MainActivity : ComponentActivity() {
     fun AddDialog(onDismiss: () -> Unit, onSave: (Rule) -> Unit) {
         val ctx = LocalContext.current
         var name by remember { mutableStateOf("规则${System.currentTimeMillis() % 1000}") }
-        var type by remember { mutableStateOf("color") }
-        var hex by remember { mutableStateOf("#FF0000") }
+        // 取色/框选完直接建规则：类型、颜色、区域、模板图都按最近一次的取色/框选自动填好
+        var type by remember { mutableStateOf(if (Pick.lastKind == "region") "image" else "color") }
+        var hex by remember { mutableStateOf(Pick.color ?: "#FF0000") }
         var tol by remember { mutableStateOf("16") }
         var thr by remember { mutableStateOf("0.85") }
-        var region by remember { mutableStateOf("") }
+        var region by remember { mutableStateOf(Pick.rect?.joinToString(",") ?: "") }
         var delay by remember { mutableStateOf("1000") }
-        var tpl by remember { mutableStateOf("") }
+        var tpl by remember { mutableStateOf(Pick.cropPath ?: "") }
         val picker = rememberLauncherForActivityResult(ActivityResultContracts.GetContent()) { uri ->
             if (uri != null) tpl = saveTemplate(ctx, uri)
         }
