@@ -1,0 +1,4 @@
+<resources>
+    <string name="app_name">图色点击器</string>
+    <string name="a11y_desc">用于模拟点击屏幕，仅在你启动任务后执行。</string>
+</resources>
