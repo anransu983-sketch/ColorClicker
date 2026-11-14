@@ -129,8 +129,9 @@ class MainActivity : ComponentActivity() {
                             Column(Modifier.weight(1f)) {
                                 Text(r.name, style = MaterialTheme.typography.titleMedium)
                                 Text(
-                                    if (r.type == "color") "找色 ${r.colorHex} ±${r.tolerance}"
-                                    else "找图 相似度≥${r.threshold}",
+                                    (if (r.type == "color") "找色 ${r.colorHex} ±${r.tolerance}"
+                                    else "找图 相似度≥${r.threshold}") +
+                                    (if (r.inputText.isNotBlank()) " → 输入「${r.inputText}」" else ""),
                                     style = MaterialTheme.typography.bodySmall
                                 )
                             }
@@ -203,6 +204,9 @@ class MainActivity : ComponentActivity() {
         var thr by remember { mutableStateOf("0.85") }
         var region by remember { mutableStateOf(Pick.rect?.joinToString(",") ?: "") }
         var delay by remember { mutableStateOf("1000") }
+        var ox by remember { mutableStateOf("0") }
+        var oy by remember { mutableStateOf("0") }
+        var input by remember { mutableStateOf("") }
         var tpl by remember { mutableStateOf(Pick.cropPath ?: "") }
         val picker = rememberLauncherForActivityResult(ActivityResultContracts.GetContent()) { uri ->
             if (uri != null) tpl = saveTemplate(ctx, uri)
@@ -239,6 +243,11 @@ class MainActivity : ComponentActivity() {
                         if (r != null) region = r.joinToString(",") else Toast.makeText(ctx, "还没有框选记录，先用悬浮窗「框选」", Toast.LENGTH_SHORT).show()
                     }) { Text("使用最近框选作为区域") }
                     OutlinedTextField(delay, { delay = it }, label = { Text("点击后等待(ms)") })
+                    Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                        OutlinedTextField(ox, { ox = it }, label = { Text("点击偏移 X") }, modifier = Modifier.weight(1f))
+                        OutlinedTextField(oy, { oy = it }, label = { Text("点击偏移 Y") }, modifier = Modifier.weight(1f))
+                    }
+                    OutlinedTextField(input, { input = it }, label = { Text("输入文字（命中点击后输入，可空）") })
                 }
             },
             confirmButton = {
@@ -249,7 +258,9 @@ class MainActivity : ComponentActivity() {
                             colorHex = hex.trim(), tolerance = tol.toIntOrNull() ?: 16,
                             templatePath = tpl, threshold = thr.toDoubleOrNull() ?: 0.85,
                             region = region.split(",").mapNotNull { it.trim().toIntOrNull() }.takeIf { it.size == 4 },
+                            offsetX = ox.toIntOrNull() ?: 0, offsetY = oy.toIntOrNull() ?: 0,
                             delayMs = delay.toLongOrNull() ?: 1000,
+                            inputText = input,
                         )
                     )
                 }) { Text("保存") }

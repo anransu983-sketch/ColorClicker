@@ -76,6 +76,10 @@ object Runner {
                     clicks++
                     AppLog.d("点击", "规则「${r.name}」点击 ($tx,$ty) 已发出，点击后等待 ${wait}ms" + if (maxClicks > 0) "（第 $clicks/$maxClicks 次）" else "")
                     delay(wait)
+                    if (r.inputText.isNotBlank()) {
+                        delay(500)   // 等输入框获得焦点再写字
+                        ClickService.inputText(r.inputText)
+                    }
                     if (maxClicks > 0 && clicks >= maxClicks) {
                         AppLog.i("服务", "已完成 $maxClicks 次点击，自动停止")
                         stop(); return@launch

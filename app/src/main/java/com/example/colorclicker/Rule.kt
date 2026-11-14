@@ -17,6 +17,7 @@ data class Rule(
     val offsetX: Int = 0,
     val offsetY: Int = 0,
     val delayMs: Long = 1000,         // 点击后等待
+    val inputText: String = "",       // 命中点击后输入的文字（空=不输入）
     val enabled: Boolean = true,
 ) {
     fun toJson() = JSONObject().apply {
@@ -25,7 +26,7 @@ data class Rule(
         put("templatePath", templatePath); put("threshold", threshold)
         put("region", region?.let { JSONArray(it) } ?: JSONObject.NULL)
         put("offsetX", offsetX); put("offsetY", offsetY)
-        put("delayMs", delayMs); put("enabled", enabled)
+        put("delayMs", delayMs); put("inputText", inputText); put("enabled", enabled)
     }
 
     companion object {
@@ -35,7 +36,8 @@ data class Rule(
             templatePath = o.optString("templatePath", ""), threshold = o.optDouble("threshold", 0.85),
             region = o.optJSONArray("region")?.let { a -> List(a.length()) { a.getInt(it) } },
             offsetX = o.optInt("offsetX", 0), offsetY = o.optInt("offsetY", 0),
-            delayMs = o.optLong("delayMs", 1000), enabled = o.optBoolean("enabled", true),
+            delayMs = o.optLong("delayMs", 1000), inputText = o.optString("inputText", ""),
+            enabled = o.optBoolean("enabled", true),
         )
     }
 }

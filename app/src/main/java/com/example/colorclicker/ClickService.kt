@@ -3,7 +3,9 @@ package com.example.colorclicker
 import android.accessibilityservice.AccessibilityService
 import android.accessibilityservice.GestureDescription
 import android.graphics.Path
+import android.os.Bundle
 import android.view.accessibility.AccessibilityEvent
+import android.view.accessibility.AccessibilityNodeInfo
 import kotlinx.coroutines.suspendCancellableCoroutine
 import kotlin.coroutines.resume
 import kotlin.random.Random
@@ -54,6 +56,59 @@ class ClickService : AccessibilityService() {
                     if (c.isActive) c.resume(false)
                 }
             }
+        }
+
+        /** 往当前可输入的框里写文字（用前先点一下输入框获得焦点）：返回是否成功。
+         *  注意：游戏自绘的输入框可能不暴露给无障碍，找不到框时会记日志说明。 */
+        fun inputText(text: String): Boolean {
+            val s = instance
+            if (s == null) {
+                AppLog.e("点击", "输入失败：无障碍服务实例为空")
+                return false
+            }
+            return try {
+                val root = s.rootInActiveWindow
+                if (root == null) {
+                    AppLog.e("点击", "输入失败：拿不到当前窗口")
+                    return false
+                }
+                val node = findEditable(root)
+                if (node == null) {
+                    AppLog.e("点击", "输入失败：没找到可输入的框（请先点一下输入框；这游戏的输入框可能不暴露给系统）")
+                    root.recycle()
+                    return false
+                }
+                val args = Bundle().apply {
+                    putCharSequence(AccessibilityNodeInfo.ACTION_ARGUMENT_SET_TEXT_CHARSEQUENCE, text)
+                }
+                val ok = node.performAction(AccessibilityNodeInfo.ACTION_SET_TEXT, args)
+                if (ok) AppLog.i("点击", "已输入文字「$text」")
+                else AppLog.e("点击", "输入失败：系统拒绝设置文字")
+                node.recycle()
+                if (node !== root) root.recycle()
+                ok
+            } catch (e: Exception) {
+                AppLog.e("点击", "输入异常", e)
+                false
+            }
+        }
+
+        /** 迭代找第一个可编辑节点（找到的节点由调用方 recycle，root 永不回收） */
+        private fun findEditable(root: AccessibilityNodeInfo): AccessibilityNodeInfo? {
+            val stack = ArrayDeque<AccessibilityNodeInfo>()
+            stack.add(root)
+            while (stack.isNotEmpty()) {
+                val n = stack.removeFirst()
+                if (n.isEditable) {
+                    while (stack.isNotEmpty()) stack.removeFirst().recycle()
+                    return n
+                }
+                for (i in 0 until n.childCount) {
+                    n.getChild(i)?.let { stack.add(it) }
+                }
+                if (n !== root) n.recycle()
+            }
+            return null
         }
     }
 }
