@@ -21,6 +21,12 @@ object Runner {
             AppLog.e("点击", "启动失败：无障碍服务未连接，请先开启无障碍服务")
             Toast.makeText(ctx, "请先开启无障碍服务", Toast.LENGTH_SHORT).show(); return false
         }
+        // 首次运行时按当前方向建截屏画面（只建一次；方向变了需重启截屏）
+        val svc = ctx as? CaptureService
+        if (svc != null && svc.ensureCapture() == 0) {
+            Toast.makeText(ctx, "建画面失败或方向变了，请先停止再重新授权截屏", Toast.LENGTH_LONG).show()
+            return false
+        }
         start(ctx.applicationContext); return true
     }
 

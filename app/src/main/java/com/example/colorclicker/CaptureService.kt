@@ -71,26 +71,47 @@ class CaptureService : Service() {
     private var capW = 0
     private var capH = 0
 
-    /** 截屏画面跟随当前方向：尺寸变了就重建 VirtualDisplay + ImageReader，否则横屏游戏会被竖屏截屏拍错 */
-    private fun ensureCaptureSize(w: Int, h: Int): Boolean {
-        if (ScreenGrabber.reader != null && capW == w && capH == h) return false
+    /**
+     * 截屏画面只建一次：首次使用时按当前方向建，之后方向变了也不重建。
+     * 这台 Android 不允许多次调 createVirtualDisplay（第二次直接抛
+     * "Don't take multiple captures..."，还会把截屏授权搞掉致服务停止），
+     * 所以 0.4/0.5 的“重建”路线走不通，改成首次使用时一次建对。
+     * 返回 0=不可用（方向变了或建失败，需停止后重新授权），1=已就绪，2=刚建好。
+     */
+    fun ensureCapture(): Int {
+        val b = wm.currentWindowMetrics.bounds
+        val w = b.width(); val h = b.height()
+        if (ScreenGrabber.reader != null) {
+            if (capW == w && capH == h) return 1
+            AppLog.w("截图", "方向变了（建画面时 ${capW}x${capH}，现在 ${w}x${h}），系统不允许多次建画面，请先点 ■ 停止，再回主界面重新点「3. 授权截屏并启动」")
+            return 0
+        }
+        val proj = projection
+        if (proj == null) {
+            AppLog.e("截图", "建截屏画面失败：截屏授权已失效，请重新授权")
+            return 0
+        }
         return try {
-            display?.release()
-            ScreenGrabber.reader?.close(); ScreenGrabber.reader = null
-            ScreenGrabber.reset()
             val dpi = resources.displayMetrics.densityDpi
             val reader = ImageReader.newInstance(w, h, PixelFormat.RGBA_8888, 2)
-            ScreenGrabber.reader = reader
-            display = projection?.createVirtualDisplay(
+            val disp = proj.createVirtualDisplay(
                 "cap", w, h, dpi,
                 DisplayManager.VIRTUAL_DISPLAY_FLAG_AUTO_MIRROR, reader.surface, null, null
             )
+            if (disp == null) {
+                reader.close()
+                AppLog.e("截图", "建截屏画面失败（${w}x${h}）：系统没给画面")
+                return 0
+            }
+            ScreenGrabber.reader = reader
+            display = disp
             capW = w; capH = h
-            AppLog.i("截图", "截屏画面已重建为 ${w}x${h}（跟随当前方向）")
-            true
+            AppLog.i("截图", "截屏画面已建 ${w}x${h}（首次使用时按当前方向）")
+            2
         } catch (e: Exception) {
-            AppLog.e("截图", "重建截屏画面失败（${w}x${h}）", e)
-            false
+            ScreenGrabber.reader?.close(); ScreenGrabber.reader = null
+            AppLog.e("截图", "建截屏画面失败（${w}x${h}）", e)
+            0
         }
     }
 
@@ -127,15 +148,7 @@ class CaptureService : Service() {
             }, Handler(Looper.getMainLooper()))
         }
         val b = wm.currentWindowMetrics.bounds
-        val dpi = resources.displayMetrics.densityDpi
-        AppLog.i("截图", "截屏服务已启动：画面 ${b.width()}x${b.height()} dpi=$dpi")
-        val reader = ImageReader.newInstance(b.width(), b.height(), PixelFormat.RGBA_8888, 2)
-        ScreenGrabber.reader = reader
-        display = projection!!.createVirtualDisplay(
-            "cap", b.width(), b.height(), dpi,
-            DisplayManager.VIRTUAL_DISPLAY_FLAG_AUTO_MIRROR, reader.surface, null, null
-        )
-        capW = b.width(); capH = b.height()
+        AppLog.i("截图", "截屏服务已启动：画面在首次取色/运行时按当前方向建（当前 ${b.width()}x${b.height()}）")
         showOverlay()
         return START_NOT_STICKY
     }
@@ -185,13 +198,16 @@ class CaptureService : Service() {
         wm.addView(bar, lp); overlay = bar
     }
 
-    /** 先隐藏工具栏，按当前方向重建截屏，截一帧干净的画面，再弹出冻结截图选择器 */
+    /** 先隐藏工具栏，首次使用时按当前方向建截屏画面，截一帧干净的画面，再弹出冻结截图选择器 */
     private fun startPick(bar: View, mode: String) {
         if (Runner.isRunning()) { toast("请先停止运行（点 ■）"); return }
         if (picker != null) return
         bar.visibility = View.INVISIBLE
-        val b0 = wm.currentWindowMetrics.bounds
-        val rebuilt = ensureCaptureSize(b0.width(), b0.height())
+        val ready = ensureCapture()
+        if (ready == 0) {
+            toast("建画面失败或方向变了，请先点 ■ 停止，再回主界面重新授权截屏")
+            bar.visibility = View.VISIBLE; return
+        }
         handler.postDelayed({
             try {
                 val bmp = ScreenGrabber.grab()
@@ -237,7 +253,7 @@ class CaptureService : Service() {
                 toast("取色失败：${e.message}，已记入日志")
                 bar.visibility = View.VISIBLE
             }
-        }, if (rebuilt) 600 else 350)
+        }, if (ready == 2) 600 else 350)
     }
 
     private fun onPicked(bmp: Bitmap, color: String?, rect: List<Int>?) {
