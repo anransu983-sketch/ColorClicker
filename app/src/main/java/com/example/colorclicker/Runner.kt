@@ -18,30 +18,79 @@ object Runner {
     fun toggle(ctx: Context): Boolean {
         if (isRunning()) { stop(); return false }
         if (ClickService.instance == null) {
+            AppLog.e("点击", "启动失败：无障碍服务未连接，请先开启无障碍服务")
             Toast.makeText(ctx, "请先开启无障碍服务", Toast.LENGTH_SHORT).show(); return false
         }
         start(ctx.applicationContext); return true
     }
 
-    fun stop() { job?.cancel(); job = null }
+    fun stop() {
+        if (isRunning()) AppLog.i("服务", "运行已停止")
+        job?.cancel(); job = null
+    }
 
     private fun start(ctx: Context) {
         job = CoroutineScope(Dispatchers.Default).launch {
+            val rules = RuleStore.load(ctx).filter { it.enabled }
+            AppLog.i("服务", "开始运行：${rules.size} 条启用规则 [${rules.joinToString("、") { it.name }}]")
+            if (rules.isEmpty()) AppLog.w("服务", "没有启用的规则，不会执行任何点击")
+            var frameLogged = false
+            var nullLogged = false
             while (isActive) {
                 val frame = ScreenGrabber.grab()
-                val rules = RuleStore.load(ctx).filter { it.enabled }
-                var acted = false
-                if (frame != null) {
-                    for (r in rules) {
-                        val p = match(frame, r) ?: continue
-                        if (!ClickService.tap(p.x + r.offsetX, p.y + r.offsetY)) { stop(); return@launch }
-                        delay((r.delayMs * Random.nextDouble(0.8, 1.2)).toLong())
-                        acted = true
-                        break   // 动作后画面已变，重新截屏再判断
+                if (frame == null) {
+                    if (!nullLogged) {
+                        AppLog.w("截图", "还没截到画面（可能未授权截屏或服务未启动）")
+                        nullLogged = true
                     }
+                    delay(300); continue
+                }
+                nullLogged = false
+                if (!frameLogged) {
+                    AppLog.i("截图", "首帧画面 ${frame.width}x${frame.height}")
+                    frameLogged = true
+                }
+                var acted = false
+                for (r in rules) {
+                    val p = match(frame, r)
+                    if (p == null) {
+                        logMiss(r)
+                        continue
+                    }
+                    logHit(r, p)
+                    val tx = p.x + r.offsetX
+                    val ty = p.y + r.offsetY
+                    val ok = ClickService.tap(tx, ty)
+                    if (!ok) {
+                        AppLog.e("点击", "规则「${r.name}」点击 ($tx,$ty) 失败：无障碍手势被拒或服务断开，停止运行")
+                        stop(); return@launch
+                    }
+                    val wait = (r.delayMs * Random.nextDouble(0.8, 1.2)).toLong()
+                    AppLog.d("点击", "规则「${r.name}」点击 ($tx,$ty) 已发出，点击后等待 ${wait}ms")
+                    delay(wait)
+                    acted = true
+                    break   // 动作后画面已变，重新截屏再判断
                 }
                 if (!acted) delay(300)
             }
+        }
+    }
+
+    private fun logHit(r: Rule, p: Point) {
+        val tx = p.x + r.offsetX
+        val ty = p.y + r.offsetY
+        if (r.type == "color") {
+            AppLog.d("匹配", "规则「${r.name}」找色 ${r.colorHex} ±${r.tolerance} → 命中 (${p.x},${p.y})，点击 ($tx,$ty)", tx, ty)
+        } else {
+            AppLog.d("匹配", "规则「${r.name}」找图 相似度 ${"%.3f".format(Matcher.lastImageScore)} ≥ ${r.threshold} → 命中 (${p.x},${p.y})，点击 ($tx,$ty)", tx, ty)
+        }
+    }
+
+    private fun logMiss(r: Rule) {
+        if (r.type == "color") {
+            AppLog.d("匹配", "规则「${r.name}」找色 ${r.colorHex} ±${r.tolerance} → 未命中")
+        } else {
+            AppLog.d("匹配", "规则「${r.name}」找图 最高相似度 ${"%.3f".format(Matcher.lastImageScore)} < ${r.threshold} → 未命中")
         }
     }
 
@@ -49,7 +98,13 @@ object Runner {
         if (r.type == "color") Matcher.findColor(frame, r.colorHex, r.tolerance, r.region)
         else {
             val tpl = tplCache.getOrPut(r.templatePath) { BitmapFactory.decodeFile(r.templatePath) }
-            if (tpl == null) null else Matcher.findImage(frame, tpl, r.threshold, r.region)
+            if (tpl == null) {
+                AppLog.e("匹配", "规则「${r.name}」模板图读不到：${r.templatePath}")
+                null
+            } else Matcher.findImage(frame, tpl, r.threshold, r.region)
         }
-    } catch (e: Exception) { null }
+    } catch (e: Exception) {
+        AppLog.e("匹配", "规则「${r.name}」匹配异常", e)
+        null
+    }
 }

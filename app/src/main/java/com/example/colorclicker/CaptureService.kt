@@ -73,16 +73,23 @@ class CaptureService : Service() {
 
         val code = intent?.getIntExtra("code", 0) ?: 0
         val data = intent?.let { IntentCompat.getParcelableExtra(it, "data", Intent::class.java) }
-        if (data == null) { stopSelf(); return START_NOT_STICKY }
+        if (data == null) {
+            AppLog.e("截图", "截屏服务启动失败：没有拿到截屏授权数据")
+            stopSelf(); return START_NOT_STICKY
+        }
 
         val mpm = getSystemService(MediaProjectionManager::class.java)
         projection = mpm.getMediaProjection(code, data).also {
             it.registerCallback(object : MediaProjection.Callback() {
-                override fun onStop() { stopSelf() }
+                override fun onStop() {
+                    AppLog.w("截图", "系统收回了截屏授权，服务停止")
+                    stopSelf()
+                }
             }, Handler(Looper.getMainLooper()))
         }
         val b = wm.currentWindowMetrics.bounds
         val dpi = resources.displayMetrics.densityDpi
+        AppLog.i("截图", "截屏服务已启动：画面 ${b.width()}x${b.height()} dpi=$dpi")
         val reader = ImageReader.newInstance(b.width(), b.height(), PixelFormat.RGBA_8888, 2)
         ScreenGrabber.reader = reader
         display = projection!!.createVirtualDisplay(
@@ -102,7 +109,11 @@ class CaptureService : Service() {
     }
 
     private fun showOverlay() {
-        if (overlay != null || !Settings.canDrawOverlays(this)) return
+        if (overlay != null) return
+        if (!Settings.canDrawOverlays(this)) {
+            AppLog.w("服务", "悬浮窗未授权，工具栏不显示")
+            return
+        }
         val run = btn("▶", 0xCC1565C0)
         val pickColor = btn("取色", 0xCC2E7D32)
         val pickRect = btn("框选", 0xCC6A1B9A)
@@ -141,7 +152,10 @@ class CaptureService : Service() {
         bar.visibility = View.INVISIBLE
         handler.postDelayed({
             val bmp = ScreenGrabber.grab()
-            if (bmp == null) { toast("还没有截到画面，请确认已授权截屏"); bar.visibility = View.VISIBLE; return@postDelayed }
+            if (bmp == null) {
+                AppLog.w("截图", "框选/取色时还没有截到画面")
+                toast("还没有截到画面，请确认已授权截屏"); bar.visibility = View.VISIBLE; return@postDelayed
+            }
             val b = wm.currentWindowMetrics.bounds
             val v = PickerView(this, bmp, mode) { color, rect ->
                 picker?.let { wm.removeView(it) }; picker = null
@@ -165,11 +179,13 @@ class CaptureService : Service() {
     private fun onPicked(bmp: Bitmap, color: String?, rect: List<Int>?) {
         if (color != null) {
             Pick.color = color
+            AppLog.i("截图", "取色 $color（已复制到剪贴板）")
             (getSystemService(CLIPBOARD_SERVICE) as ClipboardManager)
                 .setPrimaryClip(ClipData.newPlainText("color", color))
             toast("已取色 $color（已复制）。新建规则时点「使用最近取色」")
         } else if (rect != null) {
             Pick.rect = rect
+            AppLog.i("截图", "框选 ${rect.joinToString(",")}，已保存为模板图")
             val crop = Bitmap.createBitmap(bmp, rect[0], rect[1], rect[2], rect[3])
             val f = File(filesDir, "crop_${System.currentTimeMillis()}.png")
             f.outputStream().use { crop.compress(Bitmap.CompressFormat.PNG, 100, it) }
@@ -179,6 +195,7 @@ class CaptureService : Service() {
     }
 
     override fun onDestroy() {
+        AppLog.i("截图", "截屏服务已停止")
         Runner.stop()
         picker?.let { wm.removeView(it) }; picker = null
         overlay?.let { wm.removeView(it) }; overlay = null

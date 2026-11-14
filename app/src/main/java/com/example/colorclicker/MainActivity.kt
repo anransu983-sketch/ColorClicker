@@ -36,9 +36,12 @@ class MainActivity : ComponentActivity() {
         registerForActivityResult(ActivityResultContracts.StartActivityForResult()) { r ->
             val d = r.data
             if (r.resultCode == RESULT_OK && d != null) {
+                AppLog.i("截图", "已拿到截屏授权，启动截屏服务")
                 ContextCompat.startForegroundService(
                     this, Intent(this, CaptureService::class.java).putExtra("code", r.resultCode).putExtra("data", d)
                 )
+            } else {
+                AppLog.w("截图", "截屏授权被拒绝或取消")
             }
         }
 
@@ -47,7 +50,9 @@ class MainActivity : ComponentActivity() {
 
     override fun onCreate(s: Bundle?) {
         super.onCreate(s)
-        OpenCVLoader.initLocal()
+        AppLog.init(this)
+        val ok = OpenCVLoader.initLocal()
+        AppLog.i("启动", "OpenCV 初始化" + if (ok) "成功" else "失败")
         if (Build.VERSION.SDK_INT >= 33) requestPermissions(arrayOf(Manifest.permission.POST_NOTIFICATIONS), 0)
         setContent { MaterialTheme { Screen() } }
     }
@@ -57,6 +62,7 @@ class MainActivity : ComponentActivity() {
         val ctx = LocalContext.current
         val rules = remember { mutableStateListOf<Rule>().apply { addAll(RuleStore.load(ctx)) } }
         var showAdd by remember { mutableStateOf(false) }
+        var showLog by remember { mutableStateOf(false) }
         fun persist() = RuleStore.save(ctx, rules.toList())
 
         Scaffold(floatingActionButton = { FloatingActionButton(onClick = { showAdd = true }) { Text("+") } }) { pad ->
@@ -73,6 +79,7 @@ class MainActivity : ComponentActivity() {
                             startActivity(Intent(Settings.ACTION_MANAGE_OVERLAY_PERMISSION, Uri.parse("package:$packageName")))
                         }) { Text("2. 授权悬浮窗") }
                         Button({ startProjection() }) { Text("3. 授权截屏并启动") }
+                        OutlinedButton({ showLog = true }) { Text("查看详细日志") }
                     }
                 }
                 item { Text("规则（从上到下依次检测，命中即点击）", style = MaterialTheme.typography.titleSmall) }
@@ -90,14 +97,23 @@ class MainActivity : ComponentActivity() {
                             Switch(r.enabled, { on ->
                                 val i = rules.indexOfFirst { it.id == r.id }
                                 rules[i] = r.copy(enabled = on); persist()
+                                AppLog.i("规则", "规则「${r.name}」已" + if (on) "启用" else "停用")
                             })
-                            TextButton({ rules.remove(r); persist() }) { Text("删") }
+                            TextButton({
+                                rules.remove(r); persist()
+                                AppLog.i("规则", "规则「${r.name}」已删除")
+                            }) { Text("删") }
                         }
                     }
                 }
             }
         }
-        if (showAdd) AddDialog({ showAdd = false }) { rules.add(it); persist(); showAdd = false }
+        if (showAdd) AddDialog({ showAdd = false }) {
+            rules.add(it); persist()
+            AppLog.i("规则", "新建规则「${it.name}」（${if (it.type == "color") "找色 ${it.colorHex} ±${it.tolerance}" else "找图 相似度≥${it.threshold}"}）")
+            showAdd = false
+        }
+        if (showLog) LogScreen { showLog = false }
     }
 
     @Composable

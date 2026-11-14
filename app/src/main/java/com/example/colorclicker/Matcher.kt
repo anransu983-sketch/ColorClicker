@@ -11,6 +11,8 @@ import org.opencv.imgproc.Imgproc
 import kotlin.math.abs
 
 object Matcher {
+    /** 最近一次找图的最高相似度（供日志用；找色不适用） */
+    @Volatile var lastImageScore: Double = 0.0
     private fun clamp(b: Bitmap, r: List<Int>?): IntArray {
         if (r == null || r.size < 4) return intArrayOf(0, 0, b.width, b.height)
         val x = r[0].coerceIn(0, b.width - 1)
@@ -49,6 +51,7 @@ object Matcher {
             Imgproc.matchTemplate(roi, t, res, Imgproc.TM_CCOEFF_NORMED)
             val mm = Core.minMaxLoc(res)
             res.release()
+            lastImageScore = mm.maxVal
             if (mm.maxVal < thr) return null
             return Point(r[0] + mm.maxLoc.x.toInt() + t.cols() / 2, r[1] + mm.maxLoc.y.toInt() + t.rows() / 2)
         } finally {
