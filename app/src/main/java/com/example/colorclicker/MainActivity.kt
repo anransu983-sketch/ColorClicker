@@ -27,6 +27,8 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.unit.dp
 import androidx.core.content.ContextCompat
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 import org.opencv.android.OpenCVLoader
 import java.io.File
 import java.util.UUID
@@ -60,10 +62,21 @@ class MainActivity : ComponentActivity() {
     @Composable
     fun Screen() {
         val ctx = LocalContext.current
+        val scope = rememberCoroutineScope()
         val rules = remember { mutableStateListOf<Rule>().apply { addAll(RuleStore.load(ctx)) } }
         var showAdd by remember { mutableStateOf(false) }
         var showLog by remember { mutableStateOf(false) }
+        var updateInfo by remember { mutableStateOf<Updater.UpdateInfo?>(null) }
+        var updateProgress by remember { mutableStateOf(-1) }   // -1 未下载，0~100 下载中
+        var updateError by remember { mutableStateOf("") }
+        var updateChecked by remember { mutableStateOf(false) }
         fun persist() = RuleStore.save(ctx, rules.toList())
+
+        // 启动后静默检查一次更新（没网/没新版时什么都不弹）
+        LaunchedEffect(Unit) {
+            val info = withContext(kotlinx.coroutines.Dispatchers.IO) { Updater.hasUpdate(ctx) }
+            if (info != null) updateInfo = info
+        }
 
         Scaffold(floatingActionButton = { FloatingActionButton(onClick = { showAdd = true }) { Text("+") } }) { pad ->
             LazyColumn(
@@ -80,6 +93,17 @@ class MainActivity : ComponentActivity() {
                         }) { Text("2. 授权悬浮窗") }
                         Button({ startProjection() }) { Text("3. 授权截屏并启动") }
                         OutlinedButton({ showLog = true }) { Text("查看详细日志") }
+                        OutlinedButton({
+                            updateChecked = true; updateError = ""
+                            scope.launch(kotlinx.coroutines.Dispatchers.IO) {
+                                val info = Updater.hasUpdate(ctx)
+                                if (info != null) updateInfo = info
+                                else updateError = "已是最新版"
+                            }
+                        }) { Text("检查更新") }
+                        if (updateChecked && updateInfo == null && updateError.isNotEmpty()) {
+                            Text(updateError, style = MaterialTheme.typography.bodySmall)
+                        }
                     }
                 }
                 item { Text("规则（从上到下依次检测，命中即点击）", style = MaterialTheme.typography.titleSmall) }
@@ -115,6 +139,40 @@ class MainActivity : ComponentActivity() {
             showAdd = false
         }
         if (showLog) LogScreen { showLog = false }
+        updateInfo?.let { info ->
+            AlertDialog(
+                onDismissRequest = { if (updateProgress < 0) updateInfo = null },
+                title = { Text("发现新版本 ${info.versionName}") },
+                text = {
+                    Column {
+                        val curName = try { ctx.packageManager.getPackageInfo(ctx.packageName, 0).versionName } catch (_: Exception) { "?" }
+                        Text("当前已安装 $curName，新版 ${info.versionName} 可直接覆盖安装（签名固定，规则不丢）。")
+                        if (updateProgress >= 0) {
+                            Spacer(Modifier.height(8.dp))
+                            LinearProgressIndicator(progress = { updateProgress / 100f }, modifier = Modifier.fillMaxWidth())
+                            Text("下载中 ${updateProgress}%", style = MaterialTheme.typography.bodySmall)
+                        }
+                        if (updateError.isNotEmpty()) Text(updateError, color = MaterialTheme.colorScheme.error)
+                    }
+                },
+                confirmButton = {
+                    TextButton(
+                        onClick = {
+                            if (updateProgress >= 0) return@TextButton
+                            updateError = ""; updateProgress = 0
+                            scope.launch(kotlinx.coroutines.Dispatchers.IO) {
+                                val err = Updater.downloadAndInstall(ctx, info) { p -> updateProgress = p }
+                                if (err != null) { updateError = err; updateProgress = -1 }
+                            }
+                        },
+                        enabled = updateProgress < 0
+                    ) { Text(if (updateProgress >= 0) "下载中…" else "更新") }
+                },
+                dismissButton = {
+                    TextButton(onClick = { if (updateProgress < 0) updateInfo = null }) { Text("稍后") }
+                }
+            )
+        }
     }
 
     @Composable

@@ -21,7 +21,7 @@ import androidx.compose.ui.window.Dialog
 import androidx.compose.ui.window.DialogProperties
 import kotlinx.coroutines.launch
 
-private val TAGS = listOf("全部", "截图", "匹配", "点击", "规则", "服务", "启动")
+private val TAGS = listOf("全部", "截图", "匹配", "点击", "规则", "服务", "启动", "崩溃")
 
 private fun levelColor(level: String) = when (level) {
     "ERROR" -> Color(0xFFD32F2F)
@@ -57,7 +57,7 @@ fun LogScreen(onDismiss: () -> Unit) {
                     Text("详细日志", style = MaterialTheme.typography.titleLarge, modifier = Modifier.weight(1f))
                     TextButton(onDismiss) { Text("关闭") }
                 }
-                Text("共 ${AppLog.lines.size} 条（最多保留 ${AppLog.MAX_LINES} 条），同时写入 Logcat 与文件 logs/app.log", style = MaterialTheme.typography.bodySmall)
+                Text("共 ${AppLog.lines.size} 条（最多保留 ${AppLog.MAX_LINES} 条），日志保存在本机文件 logs/app.log，崩溃重启后仍可查看", style = MaterialTheme.typography.bodySmall)
                 Text("带坐标的命中日志可点「模拟点击」，在该坐标模拟一次手动点击", style = MaterialTheme.typography.bodySmall)
                 Spacer(Modifier.height(8.dp))
                 Row(Modifier.horizontalScroll(rememberScrollState()), horizontalArrangement = Arrangement.spacedBy(6.dp)) {

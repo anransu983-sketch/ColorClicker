@@ -31,8 +31,28 @@ jobs:
         with:
           gradle-version: '8.9'
 
+      # 固定签名：keystore 与密码存在仓库 secrets 里（SIGNING_KEYSTORE_B64 等），
+      # 每次 CI 都用同一把钥匙签 debug 包，手机才能直接覆盖安装，不用先卸载。
+      - name: Restore signing keystore
+        env:
+          KEYSTORE_B64: ${{ secrets.SIGNING_KEYSTORE_B64 }}
+          STORE_PASSWORD: ${{ secrets.SIGNING_STORE_PASSWORD }}
+          KEY_ALIAS: ${{ secrets.SIGNING_KEY_ALIAS }}
+          KEY_PASSWORD: ${{ secrets.SIGNING_KEY_PASSWORD }}
+        run: |
+          echo "$KEYSTORE_B64" | base64 -d > release.keystore
+          printf 'keystore.password=%s\nkey.alias=%s\nkey.password=%s\nkeystore.path=release.keystore\n' "$STORE_PASSWORD" "$KEY_ALIAS" "$KEY_PASSWORD" > signing.properties
+
       - name: Build debug APK
         run: gradle :app:assembleDebug --stacktrace
+
+      # 应用内更新用的版本描述：App 启动时拉这个文件，比对 versionCode 决定是否提示更新
+      - name: Write version.json
+        run: |
+          VC=$(grep -m1 'versionCode =' app/build.gradle.kts | grep -o '[0-9]*')
+          VN=$(grep -m1 'versionName =' app/build.gradle.kts | sed 's/.*"\(.*\)".*/\1/')
+          printf '{"versionCode":%s,"versionName":"%s","apkName":"app-debug.apk"}\n' "$VC" "$VN" > version.json
+          cat version.json
 
       - name: Upload APK artifact
         uses: actions/upload-artifact@v4
@@ -47,6 +67,8 @@ jobs:
         with:
           tag_name: ci-debug
           name: CI 最新构建（debug）
-          body: 由 GitHub Actions 在每次推送到 main 后自动构建的 debug 包。装上后按 App 内顺序完成：开启无障碍 → 授权悬浮窗 → 授权截屏并启动。
-          files: app/build/outputs/apk/debug/app-debug.apk
+          body: 由 GitHub Actions 在每次推送到 main 后自动构建的 debug 包（固定签名，可直接覆盖安装）。装上后按 App 内顺序完成：开启无障碍 → 授权悬浮窗 → 授权截屏并启动。
+          files: |
+            app/build/outputs/apk/debug/app-debug.apk
+            version.json
           fail_on_unmatched_files: true

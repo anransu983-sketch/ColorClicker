@@ -44,15 +44,20 @@ object ScreenGrabber {
 
     @Synchronized
     fun grab(): Bitmap? {
-        val img = reader?.acquireLatestImage() ?: return last   // 画面没变化时沿用上一帧
-        img.use {
-            val p = it.planes[0]
-            val pad = p.rowStride - p.pixelStride * it.width
-            val full = Bitmap.createBitmap(it.width + pad / p.pixelStride, it.height, Bitmap.Config.ARGB_8888)
-            full.copyPixelsFromBuffer(p.buffer)
-            last = if (pad == 0) full else Bitmap.createBitmap(full, 0, 0, it.width, it.height)
+        return try {
+            val img = reader?.acquireLatestImage() ?: return last   // 画面没变化时沿用上一帧
+            img.use {
+                val p = it.planes[0]
+                val pad = p.rowStride - p.pixelStride * it.width
+                val full = Bitmap.createBitmap(it.width + pad / p.pixelStride, it.height, Bitmap.Config.ARGB_8888)
+                full.copyPixelsFromBuffer(p.buffer)
+                last = if (pad == 0) full else Bitmap.createBitmap(full, 0, 0, it.width, it.height)
+            }
+            last
+        } catch (e: Exception) {
+            // reader 已关闭/画面异常时不崩溃，沿用上一帧
+            last
         }
-        return last
     }
 }
 
@@ -69,22 +74,32 @@ class CaptureService : Service() {
     /** 截屏画面跟随当前方向：尺寸变了就重建 VirtualDisplay + ImageReader，否则横屏游戏会被竖屏截屏拍错 */
     private fun ensureCaptureSize(w: Int, h: Int): Boolean {
         if (ScreenGrabber.reader != null && capW == w && capH == h) return false
-        display?.release()
-        ScreenGrabber.reader?.close(); ScreenGrabber.reader = null
-        ScreenGrabber.reset()
-        val dpi = resources.displayMetrics.densityDpi
-        val reader = ImageReader.newInstance(w, h, PixelFormat.RGBA_8888, 2)
-        ScreenGrabber.reader = reader
-        display = projection?.createVirtualDisplay(
-            "cap", w, h, dpi,
-            DisplayManager.VIRTUAL_DISPLAY_FLAG_AUTO_MIRROR, reader.surface, null, null
-        )
-        capW = w; capH = h
-        AppLog.i("截图", "截屏画面已重建为 ${w}x${h}（跟随当前方向）")
-        return true
+        return try {
+            display?.release()
+            ScreenGrabber.reader?.close(); ScreenGrabber.reader = null
+            ScreenGrabber.reset()
+            val dpi = resources.displayMetrics.densityDpi
+            val reader = ImageReader.newInstance(w, h, PixelFormat.RGBA_8888, 2)
+            ScreenGrabber.reader = reader
+            display = projection?.createVirtualDisplay(
+                "cap", w, h, dpi,
+                DisplayManager.VIRTUAL_DISPLAY_FLAG_AUTO_MIRROR, reader.surface, null, null
+            )
+            capW = w; capH = h
+            AppLog.i("截图", "截屏画面已重建为 ${w}x${h}（跟随当前方向）")
+            true
+        } catch (e: Exception) {
+            AppLog.e("截图", "重建截屏画面失败（${w}x${h}）", e)
+            false
+        }
     }
 
     override fun onBind(i: Intent?): IBinder? = null
+
+    override fun onCreate() {
+        super.onCreate()
+        AppLog.init(this)   // 装好崩溃 handler（服务进程也要能记崩溃）
+    }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         wm = getSystemService(WINDOW_SERVICE) as WindowManager
@@ -178,11 +193,12 @@ class CaptureService : Service() {
         val b0 = wm.currentWindowMetrics.bounds
         val rebuilt = ensureCaptureSize(b0.width(), b0.height())
         handler.postDelayed({
-            val bmp = ScreenGrabber.grab()
-            if (bmp == null) {
-                AppLog.w("截图", "框选/取色时还没有截到画面")
-                toast("还没有截到画面，请确认已授权截屏"); bar.visibility = View.VISIBLE; return@postDelayed
-            }
+            try {
+                val bmp = ScreenGrabber.grab()
+                if (bmp == null) {
+                    AppLog.w("截图", "框选/取色时还没有截到画面")
+                    toast("还没有截到画面，请确认已授权截屏"); bar.visibility = View.VISIBLE; return@postDelayed
+                }
             // 诊断：冻结截图是不是全黑的（全黑时取色永远是 #000000）
             var nonBlack = 0; var total = 0
             val stepX = (bmp.width / 20).coerceAtLeast(1); val stepY = (bmp.height / 20).coerceAtLeast(1)
@@ -216,6 +232,11 @@ class CaptureService : Service() {
                 layoutInDisplayCutoutMode = WindowManager.LayoutParams.LAYOUT_IN_DISPLAY_CUTOUT_MODE_ALWAYS
             }
             wm.addView(v, lp); picker = v
+            } catch (e: Exception) {
+                AppLog.e("截图", "弹出取色/框选失败", e)
+                toast("取色失败：${e.message}，已记入日志")
+                bar.visibility = View.VISIBLE
+            }
         }, if (rebuilt) 600 else 350)
     }
 
@@ -240,12 +261,16 @@ class CaptureService : Service() {
     }
 
     override fun onDestroy() {
+        handler.removeCallbacksAndMessages(null)   // 销毁后不再跑取色的延时任务
         AppLog.i("截图", "截屏服务已停止")
         Runner.stop()
-        picker?.let { wm.removeView(it) }; picker = null
-        overlay?.let { wm.removeView(it) }; overlay = null
-        display?.release(); ScreenGrabber.reader?.close(); ScreenGrabber.reader = null
-        projection?.stop()
+        try {
+            picker?.let { wm.removeView(it) }; picker = null
+            overlay?.let { wm.removeView(it) }; overlay = null
+            display?.release(); ScreenGrabber.reader?.close(); ScreenGrabber.reader = null
+            projection?.stop()
+        } catch (_: Exception) {
+        }
         super.onDestroy()
     }
 }

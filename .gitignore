@@ -10,3 +10,8 @@ captures
 .cxx
 local.properties
 *.hprof
+
+# 签名（不进仓库）
+*.keystore
+signing.properties
+release.keystore
