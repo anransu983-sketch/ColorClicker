@@ -156,6 +156,22 @@ class CaptureService : Service() {
                 AppLog.w("截图", "框选/取色时还没有截到画面")
                 toast("还没有截到画面，请确认已授权截屏"); bar.visibility = View.VISIBLE; return@postDelayed
             }
+            // 诊断：冻结截图是不是全黑的（全黑时取色永远是 #000000）
+            var nonBlack = 0; var total = 0
+            val stepX = (bmp.width / 20).coerceAtLeast(1); val stepY = (bmp.height / 20).coerceAtLeast(1)
+            var y = 0
+            while (y < bmp.height) {
+                var x = 0
+                while (x < bmp.width) {
+                    total++
+                    if (bmp.getPixel(x, y) and 0xFFFFFF != 0) nonBlack++
+                    x += stepX
+                }
+                y += stepY
+            }
+            val ratio = if (total == 0) 0 else nonBlack * 100 / total
+            AppLog.i("截图", "冻结截图 ${bmp.width}x${bmp.height}，采样 $total 点，非黑像素占比 $ratio%")
+            if (ratio < 1) AppLog.w("截图", "冻结截图几乎全黑！取色会一直是 #000000，请检查目标画面是否黑屏/锁屏")
             val b = wm.currentWindowMetrics.bounds
             val v = PickerView(this, bmp, mode) { color, rect ->
                 picker?.let { wm.removeView(it) }; picker = null

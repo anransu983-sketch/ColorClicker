@@ -93,7 +93,20 @@ class PickerView(
     private fun finish() {
         if (mode == "color") {
             val px = bmp.getPixel(bx(x1), by(y1))
-            onDone(String.format("#%06X", px and 0xFFFFFF), null)
+            val hex = String.format("#%06X", px and 0xFFFFFF)
+            // 诊断：取色点周围 5x5 的均值与非黑像素数，判断是真黑还是单点异常
+            var r = 0; var g = 0; var b = 0; var n = 0; var nonBlack = 0
+            val cx = bx(x1); val cy = by(y1)
+            for (dy in -2..2) for (dx in -2..2) {
+                val xx = (cx + dx).coerceIn(0, bmp.width - 1)
+                val yy = (cy + dy).coerceIn(0, bmp.height - 1)
+                val c = bmp.getPixel(xx, yy)
+                r += Color.red(c); g += Color.green(c); b += Color.blue(c); n++
+                if (c and 0xFFFFFF != 0) nonBlack++
+            }
+            val mean = String.format("#%02X%02X%02X", r / n, g / n, b / n)
+            AppLog.d("截图", "取色 $hex @($cx,$cy)，周围5x5均值 $mean，非黑像素 $nonBlack/25")
+            onDone(hex, null)
         } else {
             val l = bx(minOf(x0, x1)); val t = by(minOf(y0, y1))
             val r = (maxOf(x0, x1) * sc()).toInt().coerceIn(l + 1, bmp.width)
