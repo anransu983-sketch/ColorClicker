@@ -54,4 +54,9 @@ object RuleStore {
         val a = JSONArray(); rules.forEach { a.put(it.toJson()) }
         sp(c).edit().putString(KEY, a.toString()).apply()
     }
+
+    // 循环次数：成功点击多少次后自动停止，0 = 无限
+    private const val KEY_LOOP = "loop_limit"
+    fun getLoopLimit(c: Context): Int = sp(c).getInt(KEY_LOOP, 0)
+    fun setLoopLimit(c: Context, n: Int) { sp(c).edit().putInt(KEY_LOOP, n.coerceAtLeast(0)).apply() }
 }

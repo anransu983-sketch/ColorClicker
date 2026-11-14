@@ -19,12 +19,14 @@ import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.unit.dp
 import androidx.core.content.ContextCompat
 import kotlinx.coroutines.launch
@@ -70,6 +72,7 @@ class MainActivity : ComponentActivity() {
         var updateProgress by remember { mutableStateOf(-1) }   // -1 未下载，0~100 下载中
         var updateError by remember { mutableStateOf("") }
         var updateChecked by remember { mutableStateOf(false) }
+        var loopLimit by remember { mutableStateOf(RuleStore.getLoopLimit(ctx).toString()) }
         fun persist() = RuleStore.save(ctx, rules.toList())
 
         // 启动后静默检查一次更新（没网/没新版时什么都不弹）
@@ -103,6 +106,19 @@ class MainActivity : ComponentActivity() {
                         }) { Text("检查更新") }
                         if (updateChecked && updateInfo == null && updateError.isNotEmpty()) {
                             Text(updateError, style = MaterialTheme.typography.bodySmall)
+                        }
+                        Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                            Text("循环次数")
+                            OutlinedTextField(
+                                loopLimit,
+                                { v ->
+                                    loopLimit = v.filter { it.isDigit() }.take(4)
+                                    RuleStore.setLoopLimit(ctx, loopLimit.toIntOrNull() ?: 0)
+                                },
+                                modifier = Modifier.width(80.dp), singleLine = true,
+                                keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number)
+                            )
+                            Text("次（0=无限）", style = MaterialTheme.typography.bodySmall)
                         }
                     }
                 }

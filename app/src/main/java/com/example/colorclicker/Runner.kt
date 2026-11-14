@@ -27,7 +27,7 @@ object Runner {
             Toast.makeText(ctx, "建画面失败或方向变了，请先停止再重新授权截屏", Toast.LENGTH_LONG).show()
             return false
         }
-        start(ctx.applicationContext); return true
+        start(ctx.applicationContext, RuleStore.getLoopLimit(ctx)); return true
     }
 
     fun stop() {
@@ -35,13 +35,14 @@ object Runner {
         job?.cancel(); job = null
     }
 
-    private fun start(ctx: Context) {
+    private fun start(ctx: Context, maxClicks: Int) {
         job = CoroutineScope(Dispatchers.Default).launch {
             val rules = RuleStore.load(ctx).filter { it.enabled }
-            AppLog.i("服务", "开始运行：${rules.size} 条启用规则 [${rules.joinToString("、") { it.name }}]")
+            AppLog.i("服务", "开始运行：${rules.size} 条启用规则 [${rules.joinToString("、") { it.name }}]，循环 ${if (maxClicks > 0) "$maxClicks 次" else "无限"}")
             if (rules.isEmpty()) AppLog.w("服务", "没有启用的规则，不会执行任何点击")
             var frameLogged = false
             var nullLogged = false
+            var clicks = 0
             while (isActive) {
                 val frame = ScreenGrabber.grab()
                 if (frame == null) {
@@ -72,8 +73,13 @@ object Runner {
                         stop(); return@launch
                     }
                     val wait = (r.delayMs * Random.nextDouble(0.8, 1.2)).toLong()
-                    AppLog.d("点击", "规则「${r.name}」点击 ($tx,$ty) 已发出，点击后等待 ${wait}ms")
+                    clicks++
+                    AppLog.d("点击", "规则「${r.name}」点击 ($tx,$ty) 已发出，点击后等待 ${wait}ms" + if (maxClicks > 0) "（第 $clicks/$maxClicks 次）" else "")
                     delay(wait)
+                    if (maxClicks > 0 && clicks >= maxClicks) {
+                        AppLog.i("服务", "已完成 $maxClicks 次点击，自动停止")
+                        stop(); return@launch
+                    }
                     acted = true
                     break   // 动作后画面已变，重新截屏再判断
                 }
