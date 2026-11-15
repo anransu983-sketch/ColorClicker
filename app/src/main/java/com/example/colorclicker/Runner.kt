@@ -533,10 +533,16 @@ object Runner {
                         // 0.35：AI 只许在和期限规则同余量的候选里挑（比封顶后的余量），
                         // 不许越级点低余量的——第 21 局 00:23:53 模型越过余量 3 的蝎子 1 只、
                         // 点了余量 2 的史莱姆 3 只。0.28 的越线兜底是它的特例（越线余量 -1
-                        // 比不越线低，一定被这道拦下）。同余量但只数更小的（00:25:18 史莱姆
-                        // 1 只替 2 只）这道拦不住，那是模型看走眼，只能靠影子攒数据。
+                        // 比不越线低，一定被这道拦下）。
+                        // 0.37：再加只数关——同余量也只许选只数不小于期限规则那伙的。
+                        // 0.35 没拦住同余量看小：23 局三连（蝎子 2 只替史莱姆 7 只，影子
+                        // 差 +5.0；土豆 2 只替树怪 4 只；土豆 5 只替史莱姆 6 只）、25 局
+                        // 两连（史莱姆 1 只替土豆怪 2 只；树怪 2 只替蛇 4 只），影子全判
+                        // 更差。加了这道，AI 能动的只剩同余量同只数的平局（按位置挑）。
                         if (minOf(aiEv.hz, HZ_CAP) < minOf(pickEv.hz, HZ_CAP)) {
                             AppLog.w("AI判点", "AI 选了余量更低的「${aiEv.cand.rule.name.removePrefix("守卫-")}」${aiEv.cand.comp.size}只（${hzText(aiEv.hz)}），期限规则是「${pickEv.cand.rule.name.removePrefix("守卫-")}」${pickEv.cand.comp.size}只（${hzText(pickEv.hz)}），改回期限规则")
+                        } else if (aiEv.cand.comp.size < pickEv.cand.comp.size) {
+                            AppLog.w("AI判点", "AI 选了只数更少的「${aiEv.cand.rule.name.removePrefix("守卫-")}」${aiEv.cand.comp.size}只（${hzText(aiEv.hz)}），期限规则是「${pickEv.cand.rule.name.removePrefix("守卫-")}」${pickEv.cand.comp.size}只（${hzText(pickEv.hz)}），改回期限规则")
                         } else if (aiEv.cand.comp !== pickEv.cand.comp) {
                             aiChanged = true
                             AppLog.i("AI判点", "选第 ${verdict.pick} 伙「${aiEv.cand.rule.name.removePrefix("守卫-")}」${aiEv.cand.comp.size}只（第${BoardMemory.minRowOf(aiEv.cand.comp)}排，${hzText(aiEv.hz)}），期限规则本来选「${pickEv.cand.rule.name.removePrefix("守卫-")}」${pickEv.cand.comp.size}只")
