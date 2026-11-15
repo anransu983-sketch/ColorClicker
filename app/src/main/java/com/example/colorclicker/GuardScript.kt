@@ -6,7 +6,12 @@ import android.graphics.BitmapFactory
 import android.widget.Toast
 import kotlinx.coroutines.*
 
-/** 一键守卫城邦（0.18 建，0.20 补打完回挑战页，0.21 补免费没次数改点钻石＋开始挑战防连点，0.25 回退重做）：从挑战页开始自动进场 → 点免费（今日免费次数用完、点了还在就改点钻石×100） → 关玩法介绍 → 点颜色辅助 → 交棒给消消乐跑一局 → 打完回挑战页（棋盘点＋返回键＋面板点轮着试，面板点 (802,1617) 在 19:21/19:56 两次都失败）。
+/** 一键守卫城邦（0.18 建，0.20 补打完回挑战页，0.21 补免费没次数改点钻石＋开始挑战防连点，0.25 回退重做，0.34 回退再改）：
+ *  从挑战页开始自动进场 → 点免费（今日免费次数用完、点了还在就改点钻石×100） → 关玩法介绍 → 点颜色辅助 → 交棒给消消乐跑一局 → 打完回挑战页。
+ *  0.34：认结算页不再用 (802,1617) 像素——面板是半透明的，底下棋盘颜色透上来，
+ *  (802,1617) 在 00:27 那张结算图上是 #41301e（蓝通道差 24），判不到，所以之前每局
+ *  都是棋盘点 0 次＋返回键 0 次＋面板点 0 次。改成认「战斗结束」金字标题图
+ *  （tpl_guard_end.png，从 00:27 结算截图裁的），认到就按她说的：手势返回退出（返回键优先）。
  *  安全线：免费优先；只有免费点了弹窗还在（没次数了）才点钻石×100，绝不一上来就点钻石；一局打完就停，不自动续场。
  *  每一步都先在屏幕上找按钮的图片再点（不是死坐标），找不到就等、超时就停并写日志。
  *  用户 10:54–10:56 日志里的取色/框选没标是哪个按钮，对不上号，所以脚本不依赖那几个坐标，
@@ -60,6 +65,8 @@ object GuardScript {
             val tplAssist = assetBitmap(ctx, "tpl_color_assist.png")
             val tplSlime = assetBitmap(ctx, "tpl_slime.png")
             val tplPotato = assetBitmap(ctx, "tpl_potato.png")
+            val tplEnd = assetBitmap(ctx, "tpl_guard_end.png")
+            if (tplEnd == null) AppLog.w("守卫", "战斗结束标题图 tpl_guard_end.png 读不到，打完回挑战页会认不到结算屏")
             if (tplStart == null || tplFree == null || tplDiamond == null || tplClose == null || tplAssist == null) {
                 AppLog.e("守卫", "按钮模板缺失，一键守卫停了")
                 stop(); return@launch
@@ -152,24 +159,20 @@ object GuardScript {
                     if (Runner.startBattle(ctx)) {
                         AppLog.i("守卫", "已开跑，守卫脚本交棒给消消乐，等本局打完")
                         while (isActive && Runner.isRunning()) delay(1000)
-                        // 打完回挑战页（0.25 重做）：结算页没有按钮，(802,1617) 点面板
-                        // 19:21/19:56 两次都失败——面板点不算数。改成三招轮着试：
-                        // ① 点变暗棋盘的空地 (720,2500)（结果页常点任意处关闭）；
-                        // ② 系统返回键；③ 再点一次 (802,1617) 面板兜底。
-                        // 每招后都重新核对是不是回来了（开始挑战按钮出现才算）；只有
-                        // 面板棕色 #473106 还在 (802,1617) 才认定仍在结算页、不在就不乱点。
+                        // 打完回挑战页（0.34 重做）：0.25 的 (802,1617) 像素判结算页
+                        // 是坏的——面板半透明、底下棋盘颜色透上来，(802,1617) 在 00:27
+                        // 那张结算图上是 #41301e（蓝通道差 24），判不到，所以之前每局
+                        // 都是棋盘点 0 次＋返回键 0 次＋面板点 0 次。改成认「战斗结束」
+                        // 金字标题图，认到就按她说的：手势返回退出（返回键优先），再核对
+                        // 是不是回挑战页（开始挑战按钮出现才算）；返回键不行再点棋盘空地、
+                        // 再按返回键、最后点面板 (802,1617) 兜底。
                         fun isBack(): Boolean {
                             val f = ScreenGrabber.grab()
                             return f != null && Matcher.findImage(f, tplStart, 0.8, listOf(900, 550, 540, 400)) != null
                         }
                         fun onSettle(): Boolean {
                             val f = ScreenGrabber.grab() ?: return false
-                            if (f.width <= 802 || f.height <= 1617) return false
-                            val c = f.getPixel(802, 1617)
-                            val dr = Math.abs(((c shr 16) and 255) - 0x47)
-                            val dg = Math.abs(((c shr 8) and 255) - 0x31)
-                            val db = Math.abs((c and 255) - 0x06)
-                            return maxOf(dr, dg, db) <= 12
+                            return tplEnd != null && Matcher.findImage(f, tplEnd, 0.75, null) != null
                         }
                         var back = false
                         var boardTaps = 0
@@ -180,23 +183,27 @@ object GuardScript {
                             delay(1500)
                             if (isBack()) { back = true; break }
                             if (!onSettle()) { tries++; continue }
-                            AppLog.i("守卫", "还在结算页，点棋盘 (720,2500) 试着关闭")
+                            AppLog.i("守卫", "认到战斗结束，按返回键退出")
+                            ClickService.back(); backs++
+                            delay(1200)
+                            if (isBack()) { back = true; break }
+                            AppLog.i("守卫", "返回键没退出，点棋盘空地 (720,2500) 再试")
                             ClickService.tap(720, 2500); boardTaps++
                             delay(1200)
                             if (isBack()) { back = true; break }
-                            AppLog.i("守卫", "还没回，改按返回键")
+                            AppLog.i("守卫", "还没回，再按一次返回键")
                             ClickService.back(); backs++
                             delay(1200)
                             if (isBack()) { back = true; break }
                             if (retTaps < 2) {
-                                AppLog.i("守卫", "还没回，再点一次面板 (802,1617)")
+                                AppLog.i("守卫", "还没回，点面板 (802,1617) 兜底")
                                 ClickService.tap(802, 1617); retTaps++
                                 delay(1200)
                                 if (isBack()) { back = true; break }
                             }
                             tries++
                         }
-                        AppLog.i("守卫", if (back) "已退回挑战页" else "没回到挑战页（棋盘点 $boardTaps 次＋返回键 $backs 次＋面板点 $retTaps 次都试过了，你看一眼现在是什么画面）")
+                        AppLog.i("守卫", if (back) "已退回挑战页" else "没回到挑战页（返回键 $backs 次＋棋盘点 $boardTaps 次＋面板点 $retTaps 次都试过了，你看一眼现在是什么画面）")
                         AppLog.i("守卫", "本局打完，一键守卫停了（要再打一局就再点一次）")
                     } else {
                         AppLog.e("守卫", "消消乐没跑起来（可能无障碍断了或没有启用规则），一键守卫停了")
