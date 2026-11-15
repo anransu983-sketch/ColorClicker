@@ -62,6 +62,11 @@ object BoardMemory {
     private var predHit = 0
     private var predNew = 0
     private var vanished = 0
+    private var verified = 0
+    private var topHit = 0
+    private var topTotal = 0
+    private var lastPicked: List<Cell> = emptyList()
+    private var shots = 0
     private var suspect = 0
     private var overrides = 0
     private var shadowAgree = 0
@@ -76,6 +81,9 @@ object BoardMemory {
     private var cumPredHit = 0
     private var cumPredTotal = 0
     private var cumVanished = 0
+    private var cumVerified = 0
+    private var cumTopHit = 0
+    private var cumTopTotal = 0
     private var cumSuspect = 0
     private var cumOverrides = 0
     private var cumDivN = 0
@@ -89,7 +97,7 @@ object BoardMemory {
         appCtx = ctx.applicationContext
         load(ctx)
         predicted = emptyList(); predTotal = 0; predHit = 0; predNew = 0
-        vanished = 0; suspect = 0; overrides = 0
+        vanished = 0; suspect = 0; overrides = 0; verified = 0; topHit = 0; topTotal = 0; lastPicked = emptyList(); shots = 0
         shadowAgree = 0; shadowDiffer = 0; shadowGain = 0.0
         casts = 0; loggedKills = 0; roundNo = 0; dumps = 0
     }
@@ -117,6 +125,18 @@ object BoardMemory {
             val hit = predicted.size - gone.size
             val fresh = actual.count { a -> predicted.none { it.type == a.type && it.col == a.col && it.row == a.row } }
             predHit += hit; predTotal += predicted.size; predNew += fresh; vanished += gone.size
+            val top = predicted.filter { it.row <= 4 }
+            topTotal += top.size; topHit += top.count { it !in gone }
+            // 0.23 点后核实：被点那伙的格子上移一格后若原位还认得出同类怪 = 没清干净/没点中；
+            // 实际消失格数 = 被点那伙格数 − 原位仍在 + 预测有而实测无。预测命中太低（棋盘没按预期动）时作废。
+            if (lastPicked.isNotEmpty() && hit * 2 >= predicted.size) {
+                val surv = lastPicked.count { p -> actual.any { it.type == p.type && it.col == p.col && it.row == p.row - 1 } }
+                val kv = lastPicked.size - surv + gone.size
+                verified += kv
+                if (surv > 0 || kv != lastPicked.size) AppLog.w("记忆", "点后核实：记消 ${lastPicked.size} 只，核实消失 $kv 格（原位仍在 $surv 格，额外消失 ${gone.size} 格）")
+            } else if (lastPicked.isNotEmpty()) {
+                AppLog.d("记忆", "点后核实作废：预测命中 $hit/${predicted.size} 太低，棋盘没按预期动")
+            }
             val goneTxt = if (gone.isEmpty()) "" else "；预测有而实测无 ${gone.size} 格：" +
                 gone.take(6).joinToString("、") { "${it.type.removePrefix("守卫-")}@${it.col}列${it.row}排" }
             AppLog.d("记忆", "棋盘预测校验：命中 $hit/${predicted.size} 格，新刷 $fresh 只$goneTxt")
@@ -144,6 +164,7 @@ object BoardMemory {
             s.n++; s.sum += c.score; if (c.score < s.min) s.min = c.score; if (c.score > s.max) s.max = c.score
         }
         // 4. 预测下一轮：去掉点的那伙，其余上移一行；row < -1 的是撞墙的，不进预测
+        lastPicked = if (pick != null) pick.cells.ifEmpty { listOf(pick.point) }.map { Cell(pickRule, colOf(it.x), rowOfY(it.y)) } else emptyList()
         predicted = if (pick != null) {
             val picked = pick.cells.ifEmpty { listOf(pick.point) }
                 .map { Cell(pickRule, colOf(it.x), rowOfY(it.y)) }.toSet()
@@ -226,6 +247,21 @@ object BoardMemory {
         }
     }
 
+    /** 0.23：存一张图到 App 外部私有目录（日志里有完整路径）。每局最多 8 张。 */
+    fun saveBitmap(bmp: Bitmap?, tag: String) {
+        val ctx = appCtx ?: return
+        if (bmp == null || bmp.isRecycled || shots >= 8) return
+        shots++
+        try {
+            val dir = ctx.getExternalFilesDir(null) ?: ctx.filesDir
+            val f = File(dir, "shot_${battles + 1}_$tag.jpg")
+            FileOutputStream(f).use { bmp.compress(Bitmap.CompressFormat.JPEG, 85, it) }
+            AppLog.i("复盘", "已存图 ${f.absolutePath}")
+        } catch (e: Exception) {
+            AppLog.w("复盘", "存图失败：$tag")
+        }
+    }
+
     /** 一局结束时记一笔：没打过（0 施法 0 预测）就静默，只清预测。 */
     fun endBattle(ctx: Context) {
         if (casts == 0 && predTotal == 0 && shadowAgree == 0 && shadowDiffer == 0) {
@@ -234,6 +270,7 @@ object BoardMemory {
         }
         battles++
         cumPredHit += predHit; cumPredTotal += predTotal; cumVanished += vanished; cumSuspect += suspect
+        cumVerified += verified; cumTopHit += topHit; cumTopTotal += topTotal
         cumOverrides += overrides; cumDivN += shadowDiffer; cumDivGain += shadowGain
         cumCasts += casts; cumKills += loggedKills
         save(ctx)
@@ -241,16 +278,17 @@ object BoardMemory {
         AppLog.i("记忆", "本局记忆：施法 $casts 次，记消 $loggedKills 只（${"%.2f".format(if (casts > 0) loggedKills.toDouble() / casts else 0.0)} 只/次）；" +
             "预测命中 $pred 格，新刷 $predNew 只；预测有而实测无 $vanished 格；近阈值漏数嫌疑 $suspect 格；期限优先改点 $overrides 次；" +
             "影子前瞻一致 $shadowAgree 次、不同 $shadowDiffer 次" + if (shadowDiffer > 0) "（平均差 +${"%.2f".format(shadowGain / shadowDiffer)}）" else "")
-        AppLog.i("记忆", "缺口对账：结算消灭数 S 对照 记消 $loggedKills + 预测消失 $vanished + 漏数嫌疑 $suspect = ${loggedKills + vanished + suspect}（S 与它越接近，缺口越被解释）")
+        AppLog.i("记忆", "核实对账：记消 $loggedKills 只；点后核实清掉 $verified 只（逐施法对照前后棋盘，不依赖结算；两者差 ${verified - loggedKills}）；" +
+            "上部(排≤4)预测命中 ${if (topTotal > 0) "$topHit/$topTotal" else "—"}；漏数嫌疑 $suspect 格")
         val rate = if (cumPredTotal > 0) "%.1f%%".format(100.0 * cumPredHit / cumPredTotal) else "—"
-        AppLog.i("记忆", "累计 $battles 局：预测命中率 $rate，前瞻分歧 $cumDivN 次" +
+        AppLog.i("记忆", "累计 $battles 局：预测命中率 $rate（上部 ${if (cumTopTotal > 0) "%.1f%%".format(100.0 * cumTopHit / cumTopTotal) else "—"}），前瞻分歧 $cumDivN 次" +
             (if (cumDivN > 0) "（平均差 +${"%.2f".format(cumDivGain / cumDivN)}）" else "") +
             "，期限优先改点 $cumOverrides 次，累计施法 $cumCasts 次 / 记消 $cumKills 只")
         val sim = typeStats.entries.sortedBy { it.key }
             .joinToString(" ") { "${it.key.removePrefix("守卫-")}均${"%.2f".format(it.value.avg)}最低${"%.2f".format(it.value.min)}" }
         AppLog.i("记忆", "相似度累计：$sim")
         for ((name, s) in typeStats) {
-            if (s.min < 0.78) AppLog.w("记忆", "「${name.removePrefix("守卫-")}」相似度最低到 ${"%.3f".format(s.min)}（均值 ${"%.2f".format(s.avg)}），阈值可能要下调，下局留意")
+            if (s.min < 0.68) AppLog.w("记忆", "「${name.removePrefix("守卫-")}」相似度最低到 ${"%.3f".format(s.min)}（均值 ${"%.2f".format(s.avg)}），阈值可能要下调，下局留意")
         }
         predicted = emptyList()
     }
@@ -267,6 +305,7 @@ object BoardMemory {
             battles = j.optInt("battles", 0)
             cumPredHit = j.optInt("cumPredHit"); cumPredTotal = j.optInt("cumPredTotal")
             cumVanished = j.optInt("cumVanished"); cumSuspect = j.optInt("cumSuspect")
+            cumVerified = j.optInt("cumVerified"); cumTopHit = j.optInt("cumTopHit"); cumTopTotal = j.optInt("cumTopTotal")
             cumOverrides = j.optInt("cumOverrides"); cumDivN = j.optInt("cumDivN")
             cumDivGain = j.optDouble("cumDivGain", 0.0)
             cumCasts = j.optInt("cumCasts"); cumKills = j.optInt("cumKills")
@@ -292,6 +331,7 @@ object BoardMemory {
                 put("battles", battles); put("types", types)
                 put("cumPredHit", cumPredHit); put("cumPredTotal", cumPredTotal)
                 put("cumVanished", cumVanished); put("cumSuspect", cumSuspect)
+                put("cumVerified", cumVerified); put("cumTopHit", cumTopHit); put("cumTopTotal", cumTopTotal)
                 put("cumOverrides", cumOverrides); put("cumDivN", cumDivN); put("cumDivGain", cumDivGain)
                 put("cumCasts", cumCasts); put("cumKills", cumKills)
             }.toString())

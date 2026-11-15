@@ -83,7 +83,7 @@ object Matcher {
     }
 
     /** 一伙连着的同类怪：point=这伙最上面那只的中心（点它清整伙，也离城墙最近），size=这伙只数，score=那只的相似度 */
-    data class Comp(val point: Point, val size: Int, val score: Double, val ys: List<Int> = emptyList(), val cells: List<Point> = emptyList())   // ys = 这伙每只怪的中心 y；cells = 每只怪的中心点
+    data class Comp(val point: Point, val size: Int, val score: Double, val ys: List<Int> = emptyList(), val cells: List<Point> = emptyList(), val scores: List<Double> = emptyList())   // ys = 这伙每只怪的中心 y；cells = 每只怪的中心点
 
     /** 近阈值点（相似度在 阈值−0.08 ~ 阈值 之间，未算命中）：x、y 为整帧坐标里的怪中心 */
     data class Near(val x: Int, val y: Int, val score: Double)
@@ -241,10 +241,18 @@ object Matcher {
                 Point(offX + top.first + tw / 2, offY + top.second + th / 2),
                 group.size, top.third,
                 group.map { offY + accepted[it].second + th / 2 },
-                group.map { Point(offX + accepted[it].first + tw / 2, offY + accepted[it].second + th / 2) }
+                group.map { Point(offX + accepted[it].first + tw / 2, offY + accepted[it].second + th / 2) },
+                group.map { accepted[it].third }
             ))
         }
         return comps
+    }
+
+    /** 0.23：按格中心点 + 每格相似度重新连片（跨类去重丢掉一些格之后用）。点已是整帧坐标中心，不再加偏移。 */
+    fun regroup(cells: List<Point>, scores: List<Double>): List<Comp> {
+        if (cells.isEmpty()) return emptyList()
+        val acc = cells.indices.map { Triple(cells[it].x, cells[it].y, scores[it]) }
+        return groupComps(acc, 0, 0, 0, 0, STEP_PX)
     }
 
     /** 旧路径（全帧全分辨率，逐规则转换）：0.19 仅在“快路径整轮零命中”时用来复核，也给带特殊 region 的单条规则兜底。

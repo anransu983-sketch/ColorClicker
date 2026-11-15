@@ -24,6 +24,37 @@ object Runner {
     private const val SETTLE_TRIES = 8
     private const val SETTLE_FRAC = 0.02
 
+    /** 0.23 有效阈值 = min(规则阈值, 下面的数)，按规则名含的字匹配（她不用调）。
+     *  依据：0.19–0.22 相似度累计（蛇均0.93最低0.71、树均0.91最低0.77、土豆均0.95最低0.78、蝎子最低0.81）
+     *  + 每局 1–3 次“漏数嫌疑”（点掉那伙旁边的同类怪只比阈值低一点点被漏数）。放低必须配合跨类去重（见 resolveConflicts），否则会认错怪。 */
+    private fun effThr(r: Rule): Double {
+        val cap = when {
+            r.name.contains("蛇") -> 0.64
+            r.name.contains("树") -> 0.66
+            r.name.contains("土豆") -> 0.72
+            else -> 0.76
+        }
+        return minOf(r.threshold, cap)
+    }
+
+    // ───────── 0.23 滑动帧闸门 ─────────
+    /** 怪的 y 应落在 1511+240k 的整格上（模板中心与格中心有固定小偏差，如土豆约 +10，按规则学一个偏差）。偏差超过容差 = 画面在滑动，不扫、重截 */
+    private const val LATTICE_TOL = 22
+    private const val LATTICE_TOL_INIT = 40
+    private const val SLIDE_MAX_RETRY = 8
+    private const val SLIDE_RETRY_MS = 60L
+    /** 只检查 y ≤ 此值的格；最底下刚刷进来的怪是半截入画，位置不准，不拿来判滑动 */
+    private const val GATE_MAX_Y = 2800
+    private val latticeBias = HashMap<String, ArrayList<Int>>()
+    private var slideRetries = 0
+    @Volatile private var slidingFlag = false
+
+    // ───────── 0.23 复盘（死前回放）─────────
+    private val recentRounds = java.util.ArrayDeque<String>()
+    private val recentShots = ArrayList<Bitmap>()
+    private var zeroShotDone = false
+    private var zeroShots = 0
+
     fun isRunning() = job?.isActive == true
 
     /** 扎堆比数量的结果：规则、点、该规则的相似度、能消只数 */
@@ -169,6 +200,7 @@ object Runner {
             if (rules.isEmpty()) AppLog.w("服务", "没有启用的规则，不会执行任何点击")
             lastSig = ""; sameRounds = 0; noEffectStop = false; lastTapAt = 0L
             lastTapRuleId = null; lastTapPoint = null; lastTapBoardSig = ""; pendingBoardSig = ""; repeatSkips = 0; lastTapFrameSig = null
+            slideRetries = 0; slidingFlag = false; zeroShotDone = false; zeroShots = 0; clearReplay()
             BoardMemory.beginBattle(ctx)
             var frameLogged = false
             var nullLogged = false
@@ -209,6 +241,7 @@ object Runner {
                 if (!acted && clusterRules.isNotEmpty()) {
                     val best = matchClusterRound(frame, clusterRules)
                     if (noEffectStop) { stop(); return@launch }
+                    if (slidingFlag) { slidingFlag = false; delay(SLIDE_RETRY_MS); continue }
                     if (best != null) {
                         lastTapFrameSig = sig(frame)
                         val n = doTap(best.rule, best.point, maxClicks, clicks, best.score, best.count)
@@ -228,6 +261,7 @@ object Runner {
                 }
             }
             } finally {
+                deathReport()
                 BoardMemory.endBattle(ctx)
             }
         }
@@ -248,6 +282,7 @@ object Runner {
             return -1
         }
         lastTapAt = System.currentTimeMillis()
+        zeroShotDone = false
         if (cluster != null) {
             // 0.22：记下这次扎堆点击的目标 + 点之前那盘的签名，供下轮防重复点
             lastTapRuleId = r.id; lastTapPoint = Point(p.x, p.y)
@@ -275,17 +310,104 @@ object Runner {
     private data class Cand(val rule: Rule, val comp: Matcher.Comp)
     private data class Ev(val cand: Cand, val hz: Int)
 
+    private fun foldOff(y: Int): Int {
+        var d = (y - ROW0_Y) % ROW_STEP
+        if (d > ROW_STEP / 2) d -= ROW_STEP
+        if (d < -ROW_STEP / 2) d += ROW_STEP
+        return d
+    }
+
+    /** 没对齐整格的格数（只看 y ≤ GATE_MAX_Y）；对齐的格顺便更新该规则的固定偏差（中位数，最近 60 个） */
+    private fun misalignedCells(all: List<Cand>): Int {
+        var bad = 0
+        for (c in all) {
+            val hist = latticeBias.getOrPut(c.rule.name) { ArrayList() }
+            val learned = hist.size >= 10
+            val bias = if (learned) hist.sorted()[hist.size / 2] else 0
+            val tol = if (learned) LATTICE_TOL else LATTICE_TOL_INIT
+            for (y in c.comp.ys.ifEmpty { listOf(c.comp.point.y) }) {
+                if (y > GATE_MAX_Y) continue
+                val d = foldOff(y)
+                if (Math.abs(d - bias) > tol) bad++
+                else { hist.add(d); if (hist.size > 60) hist.removeAt(0) }
+            }
+        }
+        return bad
+    }
+
+    /** 跨类去重：同一位置（±90px）被两条规则都认出时只留相似度高的那个，再按剩下的格重新连片。
+     *  放低蛇/树/土豆阈值后，别类怪偶尔会以低分“认”成它们，这一步挡掉。 */
+    private fun resolveConflicts(scans: List<RuleScan>): List<RuleScan> {
+        if (scans.count { it.comps.isNotEmpty() } < 2) return scans
+        val si = ArrayList<Int>(); val pts = ArrayList<Point>(); val sc = ArrayList<Double>()
+        for ((i, s) in scans.withIndex()) for (c in s.comps) {
+            val cs = c.cells.ifEmpty { listOf(c.point) }
+            for ((k, p) in cs.withIndex()) { si.add(i); pts.add(p); sc.add(c.scores.getOrNull(k) ?: c.score) }
+        }
+        val dead = BooleanArray(pts.size)
+        var nDead = 0
+        for (a in pts.indices) for (b in pts.indices) {
+            if (si[a] == si[b]) continue
+            if (Math.abs(pts[a].x - pts[b].x) < 90 && Math.abs(pts[a].y - pts[b].y) < 90 &&
+                (sc[b] > sc[a] + 1e-9 || (Math.abs(sc[b] - sc[a]) <= 1e-9 && si[b] < si[a]))) { dead[a] = true; nDead++; break }
+        }
+        if (nDead == 0) return scans
+        AppLog.d("匹配", "跨类去重：$nDead 格同位置被相似度更高的别类怪占了，已丢弃")
+        return scans.mapIndexed { i, s ->
+            if (s.comps.isEmpty()) s else {
+                val kp = ArrayList<Point>(); val ks = ArrayList<Double>()
+                for (k in pts.indices) if (si[k] == i && !dead[k]) { kp.add(pts[k]); ks.add(sc[k]) }
+                s.copy(comps = Matcher.regroup(kp, ks))
+            }
+        }
+    }
+
+    // ───────── 复盘：保留最近 3 轮决策文字 + 最近 2 张棋盘半尺寸图，一局结束时输出/存盘 ─────────
+    private fun clearReplay() {
+        recentRounds.clear()
+        for (b in recentShots) if (!b.isRecycled) b.recycle()
+        recentShots.clear()
+    }
+
+    private fun rememberRound(evs: List<Ev>, pick: Cand, frame: Bitmap) {
+        val txt = evs.sortedBy { BoardMemory.minRowOf(it.cand.comp) }.joinToString(" ") { e ->
+            val c = e.cand.comp
+            val rows = (c.ys.ifEmpty { listOf(c.point.y) }).map { y -> rowOf(y) }.sorted().joinToString(",")
+            "${e.cand.rule.name.removePrefix("守卫-")}${c.size}只[排$rows]${hzText(e.hz)}"
+        } + " → 点${pick.rule.name.removePrefix("守卫-")}${pick.comp.size}只"
+        recentRounds.addLast(txt)
+        while (recentRounds.size > 3) recentRounds.removeFirst()
+        try {
+            val top = 1100.coerceAtMost(frame.height - 2)
+            val crop = Bitmap.createBitmap(frame, 0, top, frame.width, frame.height - top)
+            val small = Bitmap.createScaledBitmap(crop, crop.width / 2, crop.height / 2, true)
+            if (crop !== frame) crop.recycle()
+            recentShots.add(small)
+            while (recentShots.size > 2) recentShots.removeAt(0).recycle()
+        } catch (e: Exception) { }
+    }
+
+    private fun deathReport() {
+        if (recentRounds.isNotEmpty()) {
+            AppLog.i("复盘", "本局最后 ${recentRounds.size} 轮决策（旧→新；[排]=该伙每只所在排，-1=贴墙后一格）：")
+            for (t in recentRounds) AppLog.i("复盘", t)
+        }
+        val n = recentShots.size
+        for ((i, b) in recentShots.withIndex()) BoardMemory.saveBitmap(b, "last${n - i}")
+        clearReplay()
+    }
+
     private fun scanRule(frame: Bitmap, board: Matcher.BoardView?, r: Rule, tpl: Matcher.Tpl?): RuleScan {
         return try {
             if (board != null && tpl != null) {
-                val s = Matcher.findBoardComponents(board, tpl, r.threshold, r.region)
+                val s = Matcher.findBoardComponents(board, tpl, effThr(r), r.region)
                 RuleScan(r, s.comps, s.near, null)
             } else {
                 val bmp = getBmp(r)
                 if (bmp == null) {
                     AppLog.e("匹配", "规则「${r.name}」模板图读不到：${r.templatePath}")
                     RuleScan(r, emptyList(), emptyList(), "模板缺失")
-                } else RuleScan(r, Matcher.findImageComponents(frame, bmp, r.threshold, r.region), emptyList(), null)
+                } else RuleScan(r, Matcher.findImageComponents(frame, bmp, effThr(r), r.region), emptyList(), null)
             }
         } catch (e: Exception) {
             AppLog.e("匹配", "规则「${r.name}」匹配异常", e)
@@ -326,6 +448,7 @@ object Runner {
             else verified = "（旧路径复核也是 0）"
             scans = legacy
         }
+        scans = resolveConflicts(scans)
         val t2 = System.nanoTime()
 
         val all = ArrayList<Cand>()
@@ -340,12 +463,28 @@ object Runner {
         val summary = "本轮比数量：${counts.joinToString(" / ")}"
         if (all.isEmpty()) {
             AppLog.d("匹配", "$summary → 都没找到$verified")
+            // 点过之后第一次整盘全零：要么这一波清完了，要么战斗结束。存一张整屏图当凭证（每局最多 3 张）
+            if (!zeroShotDone && lastTapAt > 0 && zeroShots < 3) {
+                zeroShotDone = true; zeroShots++
+                BoardMemory.saveBitmap(frame, "zero$zeroShots")
+            }
             return null
         }
+        // 0.23 滑动帧闸门：怪没对齐到整格 = 画面正在滑动，这一帧不用（不进预测校验、不选点），稍等重截。
+        // 连等 SLIDE_MAX_RETRY 次还没对齐（帧复用或画面冻住）就按最近排处理，避免卡死。
+        val bad = misalignedCells(all)
+        if (bad > 0 && slideRetries < SLIDE_MAX_RETRY) {
+            slideRetries++
+            slidingFlag = true
+            if (slideRetries == 1) AppLog.d("匹配", "画面在滑动：$bad 格没对齐到整格，等稳定再扫")
+            return null
+        }
+        if (slideRetries > 0) AppLog.d("匹配", "滑动等待结束：重试 $slideRetries 次" + if (bad > 0) "（仍有 $bad 格没对齐，按最近排处理）" else "")
+        slideRetries = 0
         // 棋盘签名：施法后整盘会上移一行，签名必变；连续一样 = 点击没触发施法。
         // 签名里去掉贴着阈值的临界识别（0.19 实测：蛇 0.71~0.73 对 0.7 阈值，一轮有一轮没，
         // 签名每轮都变、无效果停永远触发不了，才会在结算画面上空点 7 轮）。临界只影响签名，不影响选目标。
-        val sigComps = all.filter { it.comp.score >= it.rule.threshold + 0.05 }
+        val sigComps = all.filter { it.comp.score >= effThr(it.rule) + 0.05 }
         var roundSig = ""
         if (sigComps.isNotEmpty()) {
             val sig = sigComps.sortedWith(compareBy({ it.rule.name }, { it.comp.point.y }, { it.comp.point.x }))
@@ -394,6 +533,7 @@ object Runner {
             BoardMemory.noteOverride()
             AppLog.w("匹配", "期限优先：只数最大的「${bySize.cand.rule.name.removePrefix("守卫-")}」${bySize.cand.comp.size}只，点完它 ${hzText(bySize.hz)}；改点「${pick.rule.name.removePrefix("守卫-")}」${pick.comp.size}只（${hzText(pickEv.hz)}）")
         }
+        rememberRound(evs, pick, frame)
         val near = scans.flatMap { s -> s.near.map { s.rule.name to it } }
         BoardMemory.onRound(compsAll, pick.comp, pick.rule.name, frame, near)?.let { AppLog.d("记忆", it) }
         pendingBoardSig = roundSig
