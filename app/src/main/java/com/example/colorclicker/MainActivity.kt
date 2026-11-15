@@ -30,6 +30,7 @@ import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.unit.dp
 import androidx.core.content.ContextCompat
+import androidx.core.content.FileProvider
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import org.opencv.android.OpenCVLoader
@@ -180,6 +181,23 @@ class MainActivity : ComponentActivity() {
                             Text(if (aiOn) "开" else "关", style = MaterialTheme.typography.bodySmall)
                         }
                         Text("Key 在 Google AI Studio 免费领：aistudio.google.com → Create API Key，粘贴进来就行，不用绑卡。模型默认 gemini-3.5-flash-lite（免费每天 500 次，够打十几局）；想换更强的 gemini-3.8-flash 也行，但每天只有 20 次（约一局）。每轮棋盘图发给 Gemini 判点第几伙（只发游戏画面），超时 30 秒自动退回期限规则；谷歌不通时日志里会报 AI判点调用失败，先开梦盒代理再打。", style = MaterialTheme.typography.bodySmall)
+                        OutlinedButton({
+                            val dir = ctx.getExternalFilesDir(null)
+                            val latest = dir?.listFiles { f -> f.name.startsWith("ai_unknown_tpl_") && f.name.endsWith(".png") }
+                                ?.maxByOrNull { it.lastModified() }
+                            if (latest == null) {
+                                Toast.makeText(ctx, "还没裁过未知怪模板", Toast.LENGTH_SHORT).show()
+                            } else {
+                                val uri = FileProvider.getUriForFile(ctx, "${ctx.packageName}.fileprovider", latest)
+                                val send = Intent(Intent.ACTION_SEND).apply {
+                                    type = "image/png"
+                                    putExtra(Intent.EXTRA_STREAM, uri)
+                                    addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+                                }
+                                ctx.startActivity(Intent.createChooser(send, "分享未知怪模板"))
+                            }
+                        }) { Text("分享未知怪模板（最新一张）") }
+                        Text("AI 报未知怪时自动裁的那张图（ai_unknown_tpl_…png），点这个就能发出来，不用进文件管理器翻 Android/data。", style = MaterialTheme.typography.bodySmall)
                     }
                 }
                 item { Text("规则（从上到下依次检测，命中即点击）", style = MaterialTheme.typography.titleSmall) }
