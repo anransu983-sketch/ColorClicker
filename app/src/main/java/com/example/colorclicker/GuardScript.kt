@@ -6,11 +6,12 @@ import android.graphics.BitmapFactory
 import android.widget.Toast
 import kotlinx.coroutines.*
 
-/** 一键守卫城邦（0.18 建，0.20 补打完回挑战页）：从挑战页开始自动进场 → 点免费 → 关玩法介绍 → 点颜色辅助 → 交棒给消消乐跑一局 → 打完点结算页 (802,1617) 回挑战页。
- *  安全线：只点免费入场，绝不点钻石 ×100；一局打完就停，不自动续场（免费次数一天只有 2 次）。
+/** 一键守卫城邦（0.18 建，0.20 补打完回挑战页，0.21 补免费没次数改点钻石＋开始挑战防连点）：从挑战页开始自动进场 → 点免费（今日免费次数用完、点了还在就改点钻石×100） → 关玩法介绍 → 点颜色辅助 → 交棒给消消乐跑一局 → 打完点结算页 (802,1617) 回挑战页。
+ *  安全线：免费优先；只有免费点了弹窗还在（没次数了）才点钻石×100，绝不一上来就点钻石；一局打完就停，不自动续场。
  *  每一步都先在屏幕上找按钮的图片再点（不是死坐标），找不到就等、超时就停并写日志。
  *  用户 10:54–10:56 日志里的取色/框选没标是哪个按钮，对不上号，所以脚本不依赖那几个坐标，
- *  只认她 10:59 发的四张截图里裁出来的按钮图；她日志里 (1277,478) 那个点正好落在颜色辅助按钮里，对上了。 */
+ *  只认她 10:59 发的四张截图里裁出来的按钮图；她日志里 (1277,478) 那个点正好落在颜色辅助按钮里，对上了。
+ *  钻石按钮图是她 2026-11-15 19:07 发的截图裁的（今日剩余次数：0 那张），中心约 (948,2190)。 */
 object GuardScript {
     private var job: Job? = null
     fun isRunning() = job?.isActive == true
@@ -54,18 +55,23 @@ object GuardScript {
         job = CoroutineScope(Dispatchers.Default).launch {
             val tplStart = assetBitmap(ctx, "tpl_guard_start.png")
             val tplFree = assetBitmap(ctx, "tpl_guard_free.png")
+            val tplDiamond = assetBitmap(ctx, "tpl_guard_diamond.png")
             val tplClose = assetBitmap(ctx, "tpl_guard_close.png")
             val tplAssist = assetBitmap(ctx, "tpl_color_assist.png")
             val tplSlime = assetBitmap(ctx, "tpl_slime.png")
             val tplPotato = assetBitmap(ctx, "tpl_potato.png")
-            if (tplStart == null || tplFree == null || tplClose == null || tplAssist == null) {
+            if (tplStart == null || tplFree == null || tplDiamond == null || tplClose == null || tplAssist == null) {
                 AppLog.e("守卫", "按钮模板缺失，一键守卫停了")
                 stop(); return@launch
             }
-            AppLog.i("守卫", "一键守卫开始：进场→免费→关介绍→点颜色辅助→开跑（只打一局，不点钻石）")
+            AppLog.i("守卫", "一键守卫开始：进场→免费（没次数就点钻石×100）→关介绍→点颜色辅助→开跑（只打一局）")
             BoardMemory.beginBattle(ctx)
             var tappedFree = false
+            var tappedFreeAt = 0L
+            var tappedDiamond = false
+            var diamondWarned = false
             var tappedAssist = false
+            var tappedStartAt = 0L
             val startMs = System.currentTimeMillis()
             var waitedLog = false
             while (isActive) {
@@ -79,7 +85,24 @@ object GuardScript {
                     if (p != null) {
                         AppLog.i("守卫", "找到免费入场，点 (${p.x},${p.y})")
                         ClickService.tap(p.x, p.y); tappedFree = true
+                        tappedFreeAt = System.currentTimeMillis()
                         delay(1500); continue
+                    }
+                }
+                // 1b. 免费点了还在 = 今日免费次数用完了（0.21）：2.5 秒后免费按钮还在屏幕上，
+                // 说明刚才那下没进场，改点钻石×100（只点一次）；进场成功的话免费按钮早没了，不会走到这。
+                if (tappedFree && !tappedDiamond && System.currentTimeMillis() - tappedFreeAt > 2500) {
+                    val stillFree = Matcher.findImage(frame, tplFree, 0.8, null)
+                    if (stillFree != null) {
+                        val d = Matcher.findImage(frame, tplDiamond, 0.8, listOf(700, 2050, 550, 250))
+                        if (d != null) {
+                            AppLog.i("守卫", "免费点了还在（今日免费次数用完了），改点钻石×100 (${d.x},${d.y})")
+                            ClickService.tap(d.x, d.y); tappedDiamond = true
+                            delay(1500); continue
+                        } else if (!diamondWarned) {
+                            AppLog.w("守卫", "免费点了还在，但没找到钻石按钮，再等等")
+                            diamondWarned = true
+                        }
                     }
                 }
                 // 2. 玩法介绍右上角 X（只在弹窗那片找；免费按钮优先判过，不会误关入场弹窗）
@@ -110,13 +133,18 @@ object GuardScript {
                         continue
                     }
                 }
-                // 4. 挑战页的开始挑战（只在守卫城邦那行找）
+                // 4. 挑战页的开始挑战（只在守卫城邦那行找；0.21：点过一次后 5 秒内不重
+                // 点——19:02 那次入场弹窗加载慢，1.5 秒一轮连点了 5 次开始挑战）。
                 if (!tappedFree && !tappedAssist) {
                     val s = Matcher.findImage(frame, tplStart, 0.8, listOf(900, 550, 540, 400))
                     if (s != null) {
-                        AppLog.i("守卫", "找到守卫城邦开始挑战，点 (${s.x},${s.y})")
-                        ClickService.tap(s.x, s.y)
-                        delay(1500); continue
+                        val now = System.currentTimeMillis()
+                        if (tappedStartAt == 0L || now - tappedStartAt > 5000) {
+                            AppLog.i("守卫", if (tappedStartAt == 0L) "找到守卫城邦开始挑战，点 (${s.x},${s.y})" else "开始挑战还在，隔 5 秒再点一次 (${s.x},${s.y})")
+                            ClickService.tap(s.x, s.y)
+                            tappedStartAt = now
+                            delay(1500); continue
+                        }
                     }
                 }
                 // 5. 辅助点过了 → 交棒给消消乐
@@ -163,7 +191,7 @@ object GuardScript {
                     waitedLog = true
                 }
                 if (System.currentTimeMillis() - startMs > 60_000) {
-                    AppLog.w("守卫", "60 秒没找到开始挑战/免费/颜色辅助，停了（可能不在挑战页，或今天免费次数用完了）")
+                    AppLog.w("守卫", "60 秒没找到开始挑战/免费/颜色辅助，停了（可能不在挑战页）")
                     BoardMemory.endBattle(ctx)
                     stop(); return@launch
                 }
