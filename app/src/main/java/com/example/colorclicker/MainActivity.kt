@@ -125,7 +125,13 @@ class MainActivity : ComponentActivity() {
                                 Triple("builtin_potato", "守卫-土豆怪", "tpl_potato.png"),
                                 Triple("builtin_slime", "守卫-史莱姆", "tpl_slime.png"),
                                 Triple("builtin_scorpion", "守卫-蝎子", "tpl_scorpion.png"),
+                                Triple("builtin_tree", "守卫-树怪", "tpl_tree.png"),
+                                Triple("builtin_snake", "守卫-蛇", "tpl_snake.png"),
+                                Triple("builtin_fairy", "守卫-花仙", "tpl_fairy.png"),
                             )
+                            // 土豆 0.75：0.13/0.15 局里曾掉到 0.848，离 0.8 太近；树/蛇/花仙模板从
+                            // 战斗结束暗屏裁出，颜色偏暗，阈值放宽到 0.7；史莱姆/蝎子一直 0.98+，保持 0.8
+                            val thresholds = mapOf("builtin_potato" to 0.75, "builtin_tree" to 0.7, "builtin_snake" to 0.7, "builtin_fairy" to 0.7)
                             var added = 0
                             var updated = 0
                             for ((id, name, asset) in builtins) {
@@ -135,7 +141,7 @@ class MainActivity : ComponentActivity() {
                                 }
                                 val idx = rules.indexOfFirst { it.id == id }
                                 val enabled = if (idx >= 0) rules[idx].enabled else true
-                                val fresh = Rule(id = id, name = name, type = "image", templatePath = f.absolutePath, threshold = 0.8, clusterFirst = true, delayMs = 600, enabled = enabled)
+                                val fresh = Rule(id = id, name = name, type = "image", templatePath = f.absolutePath, threshold = thresholds[id] ?: 0.8, clusterFirst = true, delayMs = 600, enabled = enabled)
                                 if (idx >= 0) { rules[idx] = fresh; updated++ } else { rules.add(fresh); added++ }
                             }
                             persist()
