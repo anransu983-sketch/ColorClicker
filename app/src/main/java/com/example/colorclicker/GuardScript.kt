@@ -5,8 +5,13 @@ import android.graphics.Bitmap
 import android.graphics.BitmapFactory
 import android.widget.Toast
 import kotlinx.coroutines.*
+import java.io.File
+import java.io.FileOutputStream
+import java.text.SimpleDateFormat
+import java.util.Date
+import java.util.Locale
 
-/** 一键守卫城邦（0.18 建，0.20 补打完回挑战页，0.21 补免费没次数改点钻石＋开始挑战防连点，0.25 回退重做，0.34 回退再改）：
+/** 一键守卫城邦（0.18 建，0.20 补打完回挑战页，0.21 补免费没次数改点钻石＋开始挑战防连点，0.25 回退重做，0.34 回退再改，0.36 回退时自裁标题图）：
  *  从挑战页开始自动进场 → 点免费（今日免费次数用完、点了还在就改点钻石×100） → 关玩法介绍 → 点颜色辅助 → 交棒给消消乐跑一局 → 打完回挑战页。
  *  0.34：认结算页不再用 (802,1617) 像素——面板是半透明的，底下棋盘颜色透上来，
  *  (802,1617) 在 00:27 那张结算图上是 #41301e（蓝通道差 24），判不到，所以之前每局
@@ -159,6 +164,28 @@ object GuardScript {
                     if (Runner.startBattle(ctx)) {
                         AppLog.i("守卫", "已开跑，守卫脚本交棒给消消乐，等本局打完")
                         while (isActive && Runner.isRunning()) delay(1000)
+                        // 0.36 自裁标题图：第 22 局回退 0/0/0——包里的标题图（00:27 结算截图
+                        // 裁的、放大回原生）5 轮都没对上。原因未定（放大模糊、那局结算屏长得
+                        // 不一样都有可能），但现成帧就在手里：回挑战页之前先从当前帧按结算
+                        // 标题的位置自裁一张（原生坐标 305,823,838×251，00:27 图的标题区），
+                        // 存成 settle_title_<时间>.png，onSettle() 里原图对不上就拿它再试——
+                        // 同一局同一块冻棋盘，底色都一样，对上来的概率比跨局模板高。裁不到
+                        // （帧太小/没画面）就当没这招，原逻辑不变。
+                        var autoEnd: Bitmap? = null
+                        try {
+                            val f0 = ScreenGrabber.grab()
+                            if (f0 != null && f0.width >= 1143 && f0.height >= 1074) {
+                                autoEnd = Bitmap.createBitmap(f0, 305, 823, 838, 251)
+                                val ts = SimpleDateFormat("yyyyMMdd-HHmmss", Locale.getDefault()).format(Date())
+                                val outFile = File(ctx.getExternalFilesDir(null), "settle_title_$ts.png")
+                                FileOutputStream(outFile).use { autoEnd!!.compress(Bitmap.CompressFormat.PNG, 100, it) }
+                                AppLog.i("守卫", "已自裁结算标题图：${outFile.name}（打完认结算屏时原图对不上就拿它再试）")
+                            } else {
+                                AppLog.w("守卫", "自裁结算标题图失败：没拿到够大的帧")
+                            }
+                        } catch (e: Exception) {
+                            AppLog.w("守卫", "自裁结算标题图失败：${e.message?.take(80)}")
+                        }
                         // 打完回挑战页（0.34 重做）：0.25 的 (802,1617) 像素判结算页
                         // 是坏的——面板半透明、底下棋盘颜色透上来，(802,1617) 在 00:27
                         // 那张结算图上是 #41301e（蓝通道差 24），判不到，所以之前每局
@@ -172,7 +199,12 @@ object GuardScript {
                         }
                         fun onSettle(): Boolean {
                             val f = ScreenGrabber.grab() ?: return false
-                            return tplEnd != null && Matcher.findImage(f, tplEnd, 0.75, null) != null
+                            if (tplEnd != null && Matcher.findImage(f, tplEnd, 0.75, null) != null) return true
+                            if (autoEnd != null && Matcher.findImage(f, autoEnd, 0.75, null) != null) {
+                                AppLog.i("守卫", "认到战斗结束（自裁标题图对上了，包里的原图没对上）")
+                                return true
+                            }
+                            return false
                         }
                         var back = false
                         var boardTaps = 0

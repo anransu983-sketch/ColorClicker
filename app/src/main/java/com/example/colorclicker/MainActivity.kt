@@ -160,6 +160,23 @@ class MainActivity : ComponentActivity() {
                         }) { Text("加载守卫城邦内置规则") }
                         Button({ GuardScript.toggle(ctx) }) { Text("一键守卫城邦") }
                         Text("在挑战页点它：自动进场→免费（没次数就点钻石×100）→关介绍→点颜色辅助→开跑一局", style = MaterialTheme.typography.bodySmall)
+                        OutlinedButton({
+                            val dir = ctx.getExternalFilesDir(null)
+                            val latest = dir?.listFiles { f -> f.name.startsWith("settle_title_") && f.name.endsWith(".png") }
+                                ?.maxByOrNull { it.lastModified() }
+                            if (latest == null) {
+                                Toast.makeText(ctx, "还没裁过结算标题图", Toast.LENGTH_SHORT).show()
+                            } else {
+                                val uri = FileProvider.getUriForFile(ctx, "${ctx.packageName}.fileprovider", latest)
+                                val send = Intent(Intent.ACTION_SEND).apply {
+                                    type = "image/png"
+                                    putExtra(Intent.EXTRA_STREAM, uri)
+                                    addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+                                }
+                                ctx.startActivity(Intent.createChooser(send, "分享结算标题图"))
+                            }
+                        }) { Text("分享结算标题图（最新一张）") }
+                        Text("打完回挑战页时从结算屏上自裁的那张标题图（settle_title_…png），认不到结算屏时点这个发出来，我拿它做新模板。", style = MaterialTheme.typography.bodySmall)
                         Text("AI 判点（Gemini 免费）", style = MaterialTheme.typography.titleSmall)
                         OutlinedTextField(
                             aiKey,
