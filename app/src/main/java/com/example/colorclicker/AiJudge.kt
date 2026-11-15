@@ -35,6 +35,8 @@ import java.util.Locale
  * 只有长得完全不一样的才算未知；②模型有一次选了"点完即越线"的候选（那局随即结束），
  * prompt 加硬规则 + Runner 里加兜底（AI 选越线、期限规则有不越线的就改回期限规则）；
  * ③模型报未知怪时把带列号/行号的棋盘图存成 ai_unknown_时间.jpg，事后能按格子裁模板。
+ * 0.29（她 21:46 一句「让ai自动裁」）：报未知怪时直接把那格从原图按 230×230 自动裁成
+ * ai_unknown_tpl_时间.png（不带画上去的号），下次发版直接拿它当新规则的模板。
  */
 object AiJudge {
     private const val PREFS = "ai_judge"
@@ -141,15 +143,27 @@ object AiJudge {
         """.trimIndent()
     }
 
-    /** 模型报未知怪时，把带列号/行号的棋盘图存一份，事后能按格子裁模板。 */
+    /** 模型报未知怪时：①把带列号/行号的棋盘图存一份；②把那格从原图上自动裁下来存成模板（PNG），
+     * 下次发版直接拿它当新规则的模板，不用再手动截图裁图。 */
     private fun saveUnknownShot(ctx: Context, frame: Bitmap, unknown: Unknown) {
         try {
             val ts = SimpleDateFormat("yyyyMMdd-HHmmss", Locale.getDefault()).format(Date())
-            val file = File(ctx.getExternalFilesDir(null), "ai_unknown_$ts.jpg")
+            val dir = ctx.getExternalFilesDir(null)
+            val boardFile = File(dir, "ai_unknown_$ts.jpg")
             val img = labeledBoard(frame)
-            FileOutputStream(file).use { img.compress(Bitmap.CompressFormat.JPEG, 85, it) }
+            FileOutputStream(boardFile).use { img.compress(Bitmap.CompressFormat.JPEG, 85, it) }
             if (!img.isRecycled) img.recycle()
-            AppLog.i("AI判点", "未知怪截图已存：${file.name}（${unknown.desc}，第 ${unknown.col} 列第 ${unknown.row} 排）")
+            // 自动裁模板：以格子中心为准，230×230，裁的是原图（不带画上去的列号行号）
+            val cx = COL_X[unknown.col]
+            val cy = ROW_Y[unknown.row]
+            val half = 115
+            val left = (cx - half).coerceIn(0, frame.width - 2 * half)
+            val top = (cy - half).coerceIn(0, frame.height - 2 * half)
+            val tpl = Bitmap.createBitmap(frame, left, top, 2 * half, 2 * half)
+            val tplFile = File(dir, "ai_unknown_tpl_$ts.png")
+            FileOutputStream(tplFile).use { tpl.compress(Bitmap.CompressFormat.PNG, 100, it) }
+            if (!tpl.isRecycled) tpl.recycle()
+            AppLog.i("AI判点", "未知怪已自动裁模板：${tplFile.name}（${unknown.desc}，第 ${unknown.col} 列第 ${unknown.row} 排），棋盘图：${boardFile.name}")
         } catch (e: Exception) {
             AppLog.w("AI判点", "未知怪截图保存失败：${e.message?.take(80)}")
         }
