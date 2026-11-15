@@ -170,9 +170,10 @@ class CaptureService : Service() {
         val run = btn("▶", 0xCC1565C0)
         val pickColor = btn("取色", 0xCC2E7D32)
         val pickRect = btn("框选", 0xCC6A1B9A)
+        val guard = btn("守卫", 0xCCEF6C00)
         val bar = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
-            addView(run); addView(pickColor); addView(pickRect)
+            addView(run); addView(pickColor); addView(pickRect); addView(guard)
         }
         val lp = WindowManager.LayoutParams(
             WindowManager.LayoutParams.WRAP_CONTENT, WindowManager.LayoutParams.WRAP_CONTENT,
@@ -189,12 +190,28 @@ class CaptureService : Service() {
                     if (abs(e.rawX - dx) > 10 || abs(e.rawY - dy) > 10) moved = true
                     if (moved) { lp.x = sx + (e.rawX - dx).toInt(); lp.y = sy + (e.rawY - dy).toInt(); wm.updateViewLayout(bar, lp) }
                 }
-                MotionEvent.ACTION_UP -> if (!moved) run.text = if (Runner.toggle(this)) "■" else "▶"
+                MotionEvent.ACTION_UP -> if (!moved) {
+                    if (GuardScript.isRunning() && !Runner.isRunning()) toast("一键守卫进场中：先点「守卫」停了它")
+                    else run.text = if (Runner.toggle(this)) "■" else "▶"
+                }
             }
             true
         }
         pickColor.setOnClickListener { startPick(bar, "color") }
         pickRect.setOnClickListener { startPick(bar, "region") }
+        // 守卫：一键守卫城邦，不用回应用点（0.20）。跑着再点一次就全停。
+        guard.setOnClickListener {
+            if (GuardScript.isRunning()) {
+                GuardScript.stop(); Runner.stop()
+                toast("一键守卫已停")
+            } else if (Runner.isRunning()) {
+                toast("消消乐跑着，先点 ■ 停了再开守卫")
+            } else if (ensureCapture() == 0) {
+                toast("建画面失败或方向变了，请先停止再重新授权截屏")
+            } else {
+                GuardScript.toggle(this)
+            }
+        }
         wm.addView(bar, lp); overlay = bar
     }
 

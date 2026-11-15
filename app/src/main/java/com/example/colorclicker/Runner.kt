@@ -206,6 +206,11 @@ object Runner {
     }
 
     private suspend fun doTap(r: Rule, p: Point, maxClicks: Int, clicks: Int, score: Double? = null, cluster: Int? = null): Int {
+        // 停了就别再发手势（0.17 实测：停的日志都出了，下一轮的点还发出去了）
+        if (job?.isActive != true) {
+            AppLog.w("点击", "已停止，本次点击取消 (${p.x},${p.y})")
+            return clicks
+        }
         logHit(r, p, score, cluster)
         val tx = p.x + r.offsetX
         val ty = p.y + r.offsetY
@@ -302,15 +307,20 @@ object Runner {
             AppLog.d("匹配", "$summary → 都没找到$verified")
             return null
         }
-        // 棋盘签名：施法后整盘会上移一行，签名必变；连续一样 = 点击没触发施法
-        val sig = all.sortedWith(compareBy({ it.rule.name }, { it.comp.point.y }, { it.comp.point.x }))
-            .joinToString(";") { "${it.rule.name}${it.comp.size}@${it.comp.point.x},${it.comp.point.y}" }
-        if (sig == lastSig) sameRounds++ else sameRounds = 0
-        lastSig = sig
-        if (sameRounds >= 2) {
-            AppLog.w("匹配", "连续 ${sameRounds + 1} 轮棋盘一字不差：点击没有触发施法，战斗可能已结束（或城墙已破），自动停止")
-            noEffectStop = true
-            return null
+        // 棋盘签名：施法后整盘会上移一行，签名必变；连续一样 = 点击没触发施法。
+        // 签名里去掉贴着阈值的临界识别（0.19 实测：蛇 0.71~0.73 对 0.7 阈值，一轮有一轮没，
+        // 签名每轮都变、无效果停永远触发不了，才会在结算画面上空点 7 轮）。临界只影响签名，不影响选目标。
+        val sigComps = all.filter { it.comp.score >= it.rule.threshold + 0.05 }
+        if (sigComps.isNotEmpty()) {
+            val sig = sigComps.sortedWith(compareBy({ it.rule.name }, { it.comp.point.y }, { it.comp.point.x }))
+                .joinToString(";") { "${it.rule.name}${it.comp.size}@${it.comp.point.x},${it.comp.point.y}" }
+            if (sig == lastSig) sameRounds++ else sameRounds = 0
+            lastSig = sig
+            if (sameRounds >= 2) {
+                AppLog.w("匹配", "连续 ${sameRounds + 1} 轮棋盘一字不差：点击没有触发施法，战斗可能已结束（或城墙已破），自动停止")
+                noEffectStop = true
+                return null
+            }
         }
         val compsAll = all.map { it.rule.name to it.comp }
         val evs = all.map { Ev(it, BoardMemory.horizonAfterKill(compsAll, it.comp)) }

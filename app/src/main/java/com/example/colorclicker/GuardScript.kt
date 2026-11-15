@@ -6,7 +6,7 @@ import android.graphics.BitmapFactory
 import android.widget.Toast
 import kotlinx.coroutines.*
 
-/** 一键守卫城邦（0.18）：从挑战页开始自动进场 → 点免费 → 关玩法介绍 → 点颜色辅助 → 交棒给消消乐跑一局。
+/** 一键守卫城邦（0.18 建，0.20 补打完回挑战页）：从挑战页开始自动进场 → 点免费 → 关玩法介绍 → 点颜色辅助 → 交棒给消消乐跑一局 → 打完点结算页 (802,1617) 回挑战页。
  *  安全线：只点免费入场，绝不点钻石 ×100；一局打完就停，不自动续场（免费次数一天只有 2 次）。
  *  每一步都先在屏幕上找按钮的图片再点（不是死坐标），找不到就等、超时就停并写日志。
  *  用户 10:54–10:56 日志里的取色/框选没标是哪个按钮，对不上号，所以脚本不依赖那几个坐标，
@@ -124,9 +124,32 @@ object GuardScript {
                     if (Runner.startBattle(ctx)) {
                         AppLog.i("守卫", "已开跑，守卫脚本交棒给消消乐，等本局打完")
                         while (isActive && Runner.isRunning()) delay(1000)
-                        delay(2000)
-                        val back = ScreenGrabber.grab()?.let { Matcher.findImage(it, tplStart, 0.8, listOf(900, 550, 540, 400)) } != null
-                        AppLog.i("守卫", if (back) "已退回挑战页" else "本局打完，还在结算/战斗画面（没回到挑战页）")
+                        // 打完回挑战页（0.20）：先等游戏自己退（挑战页的开始挑战按钮一出现就算回了）；
+                        // 还在结算页就点她 18:50 取的色点 (802,1617)——那是结算面板的棕色 #473106，认色才点，
+                        // 颜色不对不点（可能在别的画面）；最多点 3 次，每次都重新核对是不是回来了。
+                        var back = false
+                        var retTaps = 0
+                        var tries = 0
+                        while (isActive && tries < 8) {
+                            delay(1500)
+                            val f = ScreenGrabber.grab()
+                            if (f != null && Matcher.findImage(f, tplStart, 0.8, listOf(900, 550, 540, 400)) != null) {
+                                back = true; break
+                            }
+                            if (f != null && retTaps < 3 && f.width > 802 && f.height > 1617) {
+                                val c = f.getPixel(802, 1617)
+                                val dr = Math.abs(((c shr 16) and 255) - 0x47)
+                                val dg = Math.abs(((c shr 8) and 255) - 0x31)
+                                val db = Math.abs((c and 255) - 0x06)
+                                if (maxOf(dr, dg, db) <= 12) {
+                                    AppLog.i("守卫", "还在结算页，点 (802,1617) 返回")
+                                    ClickService.tap(802, 1617)
+                                    retTaps++
+                                }
+                            }
+                            tries++
+                        }
+                        AppLog.i("守卫", if (back) "已退回挑战页" else "没回到挑战页（点过返回也没回去，你看一眼现在是什么画面）")
                         AppLog.i("守卫", "本局打完，一键守卫停了（要再打一局就再点一次）")
                     } else {
                         AppLog.e("守卫", "消消乐没跑起来（可能无障碍断了或没有启用规则），一键守卫停了")
