@@ -27,6 +27,7 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.input.KeyboardType
+import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.unit.dp
 import androidx.core.content.ContextCompat
 import kotlinx.coroutines.launch
@@ -75,6 +76,8 @@ class MainActivity : ComponentActivity() {
         var updateError by remember { mutableStateOf("") }
         var updateChecked by remember { mutableStateOf(false) }
         var loopLimit by remember { mutableStateOf(RuleStore.getLoopLimit(ctx).toString()) }
+        var aiKey by remember { mutableStateOf(AiJudge.getApiKey(ctx)) }
+        var aiOn by remember { mutableStateOf(AiJudge.isEnabled(ctx)) }
         fun persist() = RuleStore.save(ctx, rules.toList())
 
         // 启动后静默检查一次更新（没网/没新版时什么都不弹）
@@ -153,6 +156,23 @@ class MainActivity : ComponentActivity() {
                         }) { Text("加载守卫城邦内置规则") }
                         Button({ GuardScript.toggle(ctx) }) { Text("一键守卫城邦") }
                         Text("在挑战页点它：自动进场→免费（没次数就点钻石×100）→关介绍→点颜色辅助→开跑一局", style = MaterialTheme.typography.bodySmall)
+                        Text("AI 判点（Gemini 免费）", style = MaterialTheme.typography.titleSmall)
+                        OutlinedTextField(
+                            aiKey,
+                            { v -> aiKey = v; AiJudge.setApiKey(ctx, v) },
+                            label = { Text("Gemini API Key（只存本机）") },
+                            modifier = Modifier.fillMaxWidth(), singleLine = true,
+                            visualTransformation = PasswordVisualTransformation()
+                        )
+                        Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                            Text("AI 判点")
+                            Switch(aiOn, { on ->
+                                aiOn = on; AiJudge.setEnabled(ctx, on)
+                                if (on && AiJudge.getApiKey(ctx).isBlank()) Toast.makeText(ctx, "先填 Gemini API Key", Toast.LENGTH_SHORT).show()
+                            })
+                            Text(if (aiOn) "开" else "关", style = MaterialTheme.typography.bodySmall)
+                        }
+                        Text("Key 在 Google AI Studio 免费领：aistudio.google.com → Create API Key，粘贴进来就行，不用绑卡。每轮棋盘图发给 Gemini 判点第几伙（只发游戏画面），超时 30 秒自动退回期限规则；谷歌不通时日志里会报 AI判点调用失败，先开梦盒代理再打。", style = MaterialTheme.typography.bodySmall)
                     }
                 }
                 item { Text("规则（从上到下依次检测，命中即点击）", style = MaterialTheme.typography.titleSmall) }

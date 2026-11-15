@@ -32,7 +32,7 @@ import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
 
-private val TAGS = listOf("全部", "截图", "匹配", "点击", "规则", "服务", "启动", "崩溃", "记忆", "守卫", "性能", "复盘")
+private val TAGS = listOf("全部", "截图", "匹配", "点击", "规则", "服务", "启动", "崩溃", "记忆", "守卫", "性能", "复盘", "AI判点")
 
 private fun levelColor(level: String) = when (level) {
     "ERROR" -> Color(0xFFD32F2F)
