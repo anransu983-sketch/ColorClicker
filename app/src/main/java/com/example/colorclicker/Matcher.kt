@@ -64,7 +64,7 @@ object Matcher {
     }
 
     /** 一伙连着的同类怪：point=这伙最上面那只的中心（点它清整伙，也离城墙最近），size=这伙只数，score=那只的相似度 */
-    data class Comp(val point: Point, val size: Int, val score: Double)
+    data class Comp(val point: Point, val size: Int, val score: Double, val ys: List<Int> = emptyList())   // ys = 这伙每只怪的中心 y（用来数贴墙排有几只）
 
     /** 连片找图：找出所有达标的匹配点，按“上下左右相连”分成一伙（一伙就是雷电一次能清掉的），返回每伙的信息。
      *  注意：不是“周围一圈有几只”——一长条连着的怪，周围一圈只能数到 2~3 只，会被一小撮扎堆的比下去（0.13 日志：上面一列土豆怪只数出 3 只，下面蝎子数出 7 只）。
@@ -154,7 +154,8 @@ object Matcher {
                 val top = group.map { accepted[it] }.minWithOrNull(compareBy({ it.second }, { it.first }))!!
                 comps.add(Comp(
                     Point(r[0] + top.first + t.cols() / 2, r[1] + top.second + t.rows() / 2),
-                    group.size, top.third
+                    group.size, top.third,
+                    group.map { r[1] + accepted[it].second + t.rows() / 2 }
                 ))
             }
             lastClusterSize = comps.maxOf { it.size }   // 供日志兜底用；真正点的那伙由调用方按 Comp 取

@@ -19,8 +19,23 @@ object Runner {
     /** 扎堆比数量的结果：规则、点、该规则的相似度、能消只数 */
     private data class ClusterPick(val rule: Rule, val point: Point, val score: Double, val count: Int)
 
-    /** y 小于此值视为靠近城墙（城墙在画面顶部约 y 1200，怪物行距约 260，y < 2300 是最上面三排） */
-    private val DANGER_Y = 2300
+    /** 棋盘第 0 排（贴墙）中心 y 与行距。第 0 排的怪下一次施法就会撞墙，第 1 排的还能再等一次 */
+    private const val ROW0_Y = 1511
+    private const val ROW_STEP = 240
+    private fun rowOf(y: Int) = Math.round((y - ROW0_Y).toDouble() / ROW_STEP).toInt().coerceAtLeast(0)
+
+    /** 价值 = 只数 + W0×贴墙排只数 + W1×第二排只数。W0/W1 是要用对照实验调的两个数 */
+    private const val W0 = 3.0
+    private const val W1 = 0.5
+    private fun value(c: Matcher.Comp): Double {
+        val ys = if (c.ys.isEmpty()) listOf(c.point.y) else c.ys
+        return c.size + W0 * ys.count { rowOf(it) == 0 } + W1 * ys.count { rowOf(it) == 1 }
+    }
+
+    /** 点击没效果的检测：连续几轮棋盘签名一字不差就停（日志里 14–17 轮就是这样） */
+    private var lastSig = ""
+    private var sameRounds = 0
+    @Volatile private var noEffectStop = false
 
     /** 返回切换后是否在运行 */
     fun toggle(ctx: Context): Boolean {
@@ -50,6 +65,7 @@ object Runner {
             val normalRules = rules - clusterRules.toSet()
             AppLog.i("服务", "开始运行：${rules.size} 条启用规则 [${rules.joinToString("、") { it.name }}]，循环 ${if (maxClicks > 0) "$maxClicks 次" else "无限"}" + if (clusterRules.isNotEmpty()) "（扎堆规则每轮比数量再点）" else "")
             if (rules.isEmpty()) AppLog.w("服务", "没有启用的规则，不会执行任何点击")
+            lastSig = ""; sameRounds = 0; noEffectStop = false
             var frameLogged = false
             var nullLogged = false
             var clicks = 0
@@ -85,6 +101,7 @@ object Runner {
                 // 2. 没普通规则命中时，扎堆规则全部比数量再点
                 if (!acted && clusterRules.isNotEmpty()) {
                     val best = matchClusterRound(frame, clusterRules)
+                    if (noEffectStop) { stop(); return@launch }
                     if (best != null) {
                         val n = doTap(best.rule, best.point, maxClicks, clicks, best.score, best.count)
                         if (n < 0) { stop(); return@launch }
@@ -132,7 +149,7 @@ object Runner {
         return n
     }
 
-    /** 扎堆规则比数量：每条都扫一遍，按“连成一伙”的只数比。最上面三排（y<2300）有怪时先杀离城墙最近的那伙，不管只数；离得远的才比只数，只数相同比相似度，再相同按规则顺序 */
+    /** 扎堆规则比价值：每条都扫一遍，按“连成一伙”算 价值 = 只数 + 3×贴墙排只数 + 0.5×第二排只数，取最高的一伙；同分取更靠近城墙的，再同分比相似度。另外检测“点击没效果”（棋盘连续一字不差）并自动停。 */
     private fun matchClusterRound(frame: Bitmap, clusterRules: List<Rule>): ClusterPick? {
         data class Cand(val rule: Rule, val comp: Matcher.Comp)
         val all = ArrayList<Cand>()
@@ -160,16 +177,27 @@ object Runner {
             AppLog.d("匹配", "$summary → 都没找到")
             return null
         }
-        val danger = all.filter { it.comp.point.y < DANGER_Y }
-        val pick = if (danger.isNotEmpty()) {
-            val d = danger.sortedWith(compareBy<Cand> { it.comp.point.y }.thenByDescending { it.comp.size }).first()
-            AppLog.d("匹配", "$summary → 点「${d.rule.name}」（离城墙最近 y ${d.comp.point.y}，连成 ${d.comp.size} 只，相似度 ${"%.3f".format(d.comp.score)}）")
-            d
-        } else {
-            val b = all.sortedWith(compareByDescending<Cand> { it.comp.size }.thenBy { it.comp.point.y }).first()
-            AppLog.d("匹配", "$summary → 点「${b.rule.name}」（连成 ${b.comp.size} 只，y${b.comp.point.y}，相似度 ${"%.3f".format(b.comp.score)}）")
-            b
+        // 棋盘签名：每一伙的规则/只数/位置。施法后整盘会上移一行，签名必变；连续一样 = 点击没触发施法
+        val sig = all.sortedWith(compareBy({ it.rule.name }, { it.comp.point.y }, { it.comp.point.x }))
+            .joinToString(";") { "${it.rule.name}${it.comp.size}@${it.comp.point.x},${it.comp.point.y}" }
+        if (sig == lastSig) sameRounds++ else sameRounds = 0
+        lastSig = sig
+        if (sameRounds >= 2) {
+            AppLog.w("匹配", "连续 ${sameRounds + 1} 轮棋盘一字不差：点击没有触发施法，战斗可能已结束（或城墙已破），自动停止")
+            noEffectStop = true
+            return null
         }
+        val ranked = all.sortedWith(
+            compareByDescending<Cand> { value(it.comp) }
+                .thenBy { it.comp.point.y }
+                .thenByDescending { it.comp.score }
+        )
+        val pick = ranked.first()
+        val top3 = ranked.take(3).joinToString(" | ") {
+            "${it.rule.name.removePrefix("守卫-")}${it.comp.size}只 第${rowOf(it.comp.point.y)}排 价值${"%.1f".format(value(it.comp))}"
+        }
+        val wallCnt = (pick.comp.ys.ifEmpty { listOf(pick.comp.point.y) }).count { rowOf(it) == 0 }
+        AppLog.d("匹配", "$summary → 点「${pick.rule.name}」（价值 ${"%.1f".format(value(pick.comp))}，连成 ${pick.comp.size} 只，其中贴墙 $wallCnt 只，y${pick.comp.point.y}，相似度 ${"%.3f".format(pick.comp.score)}）候选前三：$top3")
         return ClusterPick(pick.rule, pick.comp.point, pick.comp.score, pick.comp.size)
     }
 

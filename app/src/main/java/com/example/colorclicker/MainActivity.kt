@@ -139,7 +139,7 @@ class MainActivity : ComponentActivity() {
                                 if (idx >= 0) { rules[idx] = fresh; updated++ } else { rules.add(fresh); added++ }
                             }
                             persist()
-                            AppLog.i("规则", "守卫城邦内置规则：新增 $added 条，更新 $updated 条（点后延迟 600ms，靠近城墙的先杀）")
+                            AppLog.i("规则", "守卫城邦内置规则：新增 $added 条，更新 $updated 条（点后延迟 600ms，按价值选目标）")
                             Toast.makeText(ctx, if (added + updated > 0) "内置规则已同步（新增 $added，更新 $updated）" else "内置规则已是最新", Toast.LENGTH_SHORT).show()
                         }) { Text("加载守卫城邦内置规则") }
                     }
