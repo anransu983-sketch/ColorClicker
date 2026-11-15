@@ -148,6 +148,8 @@ class MainActivity : ComponentActivity() {
                             AppLog.i("规则", "守卫城邦内置规则：新增 $added 条，更新 $updated 条（点后延迟 600ms，按价值选目标）")
                             Toast.makeText(ctx, if (added + updated > 0) "内置规则已同步（新增 $added，更新 $updated）" else "内置规则已是最新", Toast.LENGTH_SHORT).show()
                         }) { Text("加载守卫城邦内置规则") }
+                        Button({ GuardScript.toggle(ctx) }) { Text("一键守卫城邦") }
+                        Text("在挑战页点它：自动进场→点颜色辅助→开跑一局（只点免费，不点钻石）", style = MaterialTheme.typography.bodySmall)
                     }
                 }
                 item { Text("规则（从上到下依次检测，命中即点击）", style = MaterialTheme.typography.titleSmall) }

@@ -64,7 +64,7 @@ object Matcher {
     }
 
     /** 一伙连着的同类怪：point=这伙最上面那只的中心（点它清整伙，也离城墙最近），size=这伙只数，score=那只的相似度 */
-    data class Comp(val point: Point, val size: Int, val score: Double, val ys: List<Int> = emptyList())   // ys = 这伙每只怪的中心 y（用来数贴墙排有几只）
+    data class Comp(val point: Point, val size: Int, val score: Double, val ys: List<Int> = emptyList(), val cells: List<Point> = emptyList())   // ys = 这伙每只怪的中心 y（用来数贴墙排有几只）；cells = 每只怪的中心点（记忆学习做棋盘预测用）
 
     /** 连片找图：找出所有达标的匹配点，按“上下左右相连”分成一伙（一伙就是雷电一次能清掉的），返回每伙的信息。
      *  注意：不是“周围一圈有几只”——一长条连着的怪，周围一圈只能数到 2~3 只，会被一小撮扎堆的比下去（0.13 日志：上面一列土豆怪只数出 3 只，下面蝎子数出 7 只）。
@@ -96,7 +96,7 @@ object Matcher {
                 val p = Point(r[0] + mm.maxLoc.x.toInt() + t.cols() / 2, r[1] + mm.maxLoc.y.toInt() + t.rows() / 2)
                 res.release()
                 lastClusterSize = 1
-                return listOf(Comp(p, 1, mm.maxVal))
+                return listOf(Comp(p, 1, mm.maxVal, cells = listOf(p)))
             }
             // 达标点太多时只留分数最高的 600 个再做 NMS：板子越满达标点越多，抑制和计数的 O(n²) 循环会把每轮从 1.5 秒拖到 3 秒多
             val scored = rawList.map { p ->
@@ -155,7 +155,8 @@ object Matcher {
                 comps.add(Comp(
                     Point(r[0] + top.first + t.cols() / 2, r[1] + top.second + t.rows() / 2),
                     group.size, top.third,
-                    group.map { r[1] + accepted[it].second + t.rows() / 2 }
+                    group.map { r[1] + accepted[it].second + t.rows() / 2 },
+                    group.map { Point(r[0] + accepted[it].first + t.cols() / 2, r[1] + accepted[it].second + t.rows() / 2) }
                 ))
             }
             lastClusterSize = comps.maxOf { it.size }   // 供日志兜底用；真正点的那伙由调用方按 Comp 取

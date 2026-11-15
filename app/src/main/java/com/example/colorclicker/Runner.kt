@@ -37,6 +37,20 @@ object Runner {
     private var sameRounds = 0
     @Volatile private var noEffectStop = false
 
+    /** 一键守卫交棒用：已在跑返回 true；没跑起来返回 false（调用方记日志）。 */
+    fun startBattle(ctx: Context): Boolean {
+        if (isRunning()) return true
+        if (ClickService.instance == null) {
+            AppLog.e("点击", "启动失败：无障碍服务未连接，请先开启无障碍服务")
+            return false
+        }
+        if (ScreenGrabber.reader == null) {
+            AppLog.e("点击", "启动失败：还没截到画面（可能未授权截屏或服务未启动）")
+            return false
+        }
+        start(ctx.applicationContext, RuleStore.getLoopLimit(ctx)); return true
+    }
+
     /** 返回切换后是否在运行 */
     fun toggle(ctx: Context): Boolean {
         if (isRunning()) { stop(); return false }
@@ -66,10 +80,12 @@ object Runner {
             AppLog.i("服务", "开始运行：${rules.size} 条启用规则 [${rules.joinToString("、") { it.name }}]，循环 ${if (maxClicks > 0) "$maxClicks 次" else "无限"}" + if (clusterRules.isNotEmpty()) "（扎堆规则每轮比数量再点）" else "")
             if (rules.isEmpty()) AppLog.w("服务", "没有启用的规则，不会执行任何点击")
             lastSig = ""; sameRounds = 0; noEffectStop = false
+            BoardMemory.beginBattle(ctx)
             var frameLogged = false
             var nullLogged = false
             var clicks = 0
             var missRounds = 0   // 连续全不命中的轮数
+            try {
             while (isActive) {
                 val frame = ScreenGrabber.grab()
                 if (frame == null) {
@@ -120,6 +136,9 @@ object Runner {
                     delay(300)
                 }
             }
+            } finally {
+                BoardMemory.endBattle(ctx)
+            }
         }
     }
 
@@ -134,6 +153,7 @@ object Runner {
             AppLog.e("点击", "规则「${r.name}」点击 ($tx,$ty) 失败：无障碍手势被拒或服务断开，停止运行")
             return -1
         }
+        BoardMemory.noteTap(cluster ?: 1)
         val wait = (r.delayMs * Random.nextDouble(0.8, 1.2)).toLong()
         val n = clicks + 1
         AppLog.d("点击", "规则「${r.name}」点击 ($tx,$ty) 已发出，点击后等待 ${wait}ms" + if (maxClicks > 0) "（第 $n/$maxClicks 次）" else "")
@@ -198,6 +218,7 @@ object Runner {
         }
         val wallCnt = (pick.comp.ys.ifEmpty { listOf(pick.comp.point.y) }).count { rowOf(it) == 0 }
         AppLog.d("匹配", "$summary → 点「${pick.rule.name}」（价值 ${"%.1f".format(value(pick.comp))}，连成 ${pick.comp.size} 只，其中贴墙 $wallCnt 只，y${pick.comp.point.y}，相似度 ${"%.3f".format(pick.comp.score)}）候选前三：$top3")
+        BoardMemory.onRound(all.map { it.rule.name to it.comp }, pick.comp, pick.rule.name)?.let { AppLog.d("记忆", it) }
         return ClusterPick(pick.rule, pick.comp.point, pick.comp.score, pick.comp.size)
     }
 
