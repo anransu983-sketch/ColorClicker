@@ -136,10 +136,12 @@ class MainActivity : ComponentActivity() {
                                 Triple("builtin_tree", "守卫-树怪", "tpl_tree.png"),
                                 Triple("builtin_snake", "守卫-蛇", "tpl_snake.png"),
                                 Triple("builtin_fairy", "守卫-花仙", "tpl_fairy.png"),
+                                Triple("builtin_jellyfish", "守卫-水母", "tpl_jellyfish.png"),
                             )
                             // 土豆 0.75：0.13/0.15 局里曾掉到 0.848，离 0.8 太近；树/蛇/花仙模板从
                             // 战斗结束暗屏裁出，颜色偏暗，阈值放宽到 0.7；史莱姆/蝎子一直 0.98+，保持 0.8
-                            val thresholds = mapOf("builtin_potato" to 0.75, "builtin_tree" to 0.7, "builtin_snake" to 0.7, "builtin_fairy" to 0.7)
+                            // 水母 0.75：模板是 0.29 AI 自动裁的亮屏原图（第 12 局 22:21:39 那只），先按土豆档起步
+                            val thresholds = mapOf("builtin_potato" to 0.75, "builtin_tree" to 0.7, "builtin_snake" to 0.7, "builtin_fairy" to 0.7, "builtin_jellyfish" to 0.75)
                             var added = 0
                             var updated = 0
                             for ((id, name, asset) in builtins) {
