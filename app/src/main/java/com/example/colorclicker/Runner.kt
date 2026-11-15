@@ -132,9 +132,10 @@ object Runner {
         return n
     }
 
-    /** 扎堆规则比数量：每条都扫一遍。靠近城墙的先杀（不管扎堆，离城墙最近的那只）；离得远的才比数量，数量相同比相似度，再相同按规则顺序 */
+    /** 扎堆规则比数量：每条都扫一遍，按“连成一伙”的只数比。最上面三排（y<2300）有怪时先杀离城墙最近的那伙，不管只数；离得远的才比只数，只数相同比相似度，再相同按规则顺序 */
     private fun matchClusterRound(frame: Bitmap, clusterRules: List<Rule>): ClusterPick? {
-        val candidates = ArrayList<ClusterPick>()
+        data class Cand(val rule: Rule, val comp: Matcher.Comp)
+        val all = ArrayList<Cand>()
         val counts = ArrayList<String>()
         for (r in clusterRules) {
             val tpl = tplCache.getOrPut(r.templatePath) { BitmapFactory.decodeFile(r.templatePath) }
@@ -143,30 +144,33 @@ object Runner {
                 counts.add("${r.name} 模板缺失")
                 continue
             }
-            val p = try { Matcher.findImageCluster(frame, tpl, r.threshold, r.region) } catch (e: Exception) {
-                AppLog.e("匹配", "规则「${r.name}」匹配异常", e); null
+            val comps = try { Matcher.findImageComponents(frame, tpl, r.threshold, r.region) } catch (e: Exception) {
+                AppLog.e("匹配", "规则「${r.name}」匹配异常", e); emptyList()
             }
-            val c = if (p == null) 0 else Matcher.lastClusterSize
-            val s = Matcher.lastImageScore
-            counts.add("${r.name} ${c}只" + if (p != null) "(y${p.y})" else "")
-            if (p != null) candidates.add(ClusterPick(r, p, s, c))
+            if (comps.isEmpty()) {
+                counts.add("${r.name} 0只")
+                continue
+            }
+            val best = comps.sortedWith(compareByDescending<Matcher.Comp> { it.size }.thenBy { it.point.y }).first()
+            counts.add("${r.name} ${best.size}只(y${best.point.y})")
+            for (c in comps) all.add(Cand(r, c))
         }
         val summary = "本轮比数量：${counts.joinToString(" / ")}"
-        if (candidates.isEmpty()) {
+        if (all.isEmpty()) {
             AppLog.d("匹配", "$summary → 都没找到")
             return null
         }
-        val danger = candidates.filter { it.point.y < DANGER_Y }
-        val best = if (danger.isNotEmpty()) {
-            val d = danger.minByOrNull { it.point.y }!!
-            AppLog.d("匹配", "$summary → 点「${d.rule.name}」（离城墙最近 y ${d.point.y}，扎堆 ${d.count} 只，相似度 ${"%.3f".format(d.score)}）")
+        val danger = all.filter { it.comp.point.y < DANGER_Y }
+        val pick = if (danger.isNotEmpty()) {
+            val d = danger.sortedWith(compareBy<Cand> { it.comp.point.y }.thenByDescending { it.comp.size }).first()
+            AppLog.d("匹配", "$summary → 点「${d.rule.name}」（离城墙最近 y ${d.comp.point.y}，连成 ${d.comp.size} 只，相似度 ${"%.3f".format(d.comp.score)}）")
             d
         } else {
-            val b = candidates.maxWithOrNull(compareBy<ClusterPick> { it.count }.thenBy { it.score })!!
-            AppLog.d("匹配", "$summary → 点「${b.rule.name}」（扎堆 ${b.count} 只，相似度 ${"%.3f".format(b.score)}）")
+            val b = all.sortedWith(compareByDescending<Cand> { it.comp.size }.thenBy { it.comp.point.y }).first()
+            AppLog.d("匹配", "$summary → 点「${b.rule.name}」（连成 ${b.comp.size} 只，y${b.comp.point.y}，相似度 ${"%.3f".format(b.comp.score)}）")
             b
         }
-        return best
+        return ClusterPick(pick.rule, pick.comp.point, pick.comp.score, pick.comp.size)
     }
 
     private fun logHit(r: Rule, p: Point, score: Double? = null, cluster: Int? = null) {
@@ -177,7 +181,7 @@ object Runner {
         } else {
             val s = score ?: Matcher.lastImageScore
             val c = cluster ?: Matcher.lastClusterSize
-            AppLog.d("匹配", "规则「${r.name}」找图 相似度 ${"%.3f".format(s)} ≥ ${r.threshold} → 命中 (${p.x},${p.y})，点击 ($tx,$ty)" + if (r.clusterFirst) "（扎堆 $c 只）" else "", tx, ty)
+            AppLog.d("匹配", "规则「${r.name}」找图 相似度 ${"%.3f".format(s)} ≥ ${r.threshold} → 命中 (${p.x},${p.y})，点击 ($tx,$ty)" + if (r.clusterFirst) "（连成 $c 只）" else "", tx, ty)
         }
     }
 
@@ -196,8 +200,12 @@ object Runner {
             if (tpl == null) {
                 AppLog.e("匹配", "规则「${r.name}」模板图读不到：${r.templatePath}")
                 null
-            } else if (r.clusterFirst) Matcher.findImageCluster(frame, tpl, r.threshold, r.region)
-            else Matcher.findImage(frame, tpl, r.threshold, r.region)
+            } else if (r.clusterFirst) {
+                // 单条扎堆规则按顺序检测时，点它最大那伙最上面那只
+                Matcher.findImageComponents(frame, tpl, r.threshold, r.region)
+                    .sortedWith(compareByDescending<Matcher.Comp> { it.size }.thenBy { it.point.y })
+                    .firstOrNull()?.point
+            } else Matcher.findImage(frame, tpl, r.threshold, r.region)
         }
     } catch (e: Exception) {
         AppLog.e("匹配", "规则「${r.name}」匹配异常", e)

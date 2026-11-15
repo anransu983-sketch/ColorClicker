@@ -63,10 +63,14 @@ object Matcher {
         }
     }
 
-    /** 找图（扎堆优先）：找出所有达标的匹配点，返回“周围同类最多”那只的中心。
-     *  同类判定：中心间距 ≤ 模板最大边的 1.6 倍（相邻格子约 1 倍，对角约 1.41 倍）。
-     *  模板请框整只怪（连格子一起），框太紧会导致相邻间距大于判定半径。 */
-    fun findImageCluster(bmp: Bitmap, tpl: Bitmap, thr: Double, region: List<Int>?): Point? {
+    /** 一伙连着的同类怪：point=这伙最上面那只的中心（点它清整伙，也离城墙最近），size=这伙只数，score=那只的相似度 */
+    data class Comp(val point: Point, val size: Int, val score: Double)
+
+    /** 连片找图：找出所有达标的匹配点，按“上下左右相连”分成一伙（一伙就是雷电一次能清掉的），返回每伙的信息。
+     *  注意：不是“周围一圈有几只”——一长条连着的怪，周围一圈只能数到 2~3 只，会被一小撮扎堆的比下去（0.13 日志：上面一列土豆怪只数出 3 只，下面蝎子数出 7 只）。
+     *  相邻只认上下左右（斜向不算）：0.13 日志里蝎子 7 只连点两次同一坐标，说明斜向的怪没一起清掉。
+     *  格距按最近邻距离估算（实测 240，夹在 200~300）。 */
+    fun findImageComponents(bmp: Bitmap, tpl: Bitmap, thr: Double, region: List<Int>?): List<Comp> {
         val r = clamp(bmp, region)
         val src = Mat(); val t = Mat()
         Utils.bitmapToMat(bmp, src); Utils.bitmapToMat(tpl, t)
@@ -74,12 +78,12 @@ object Matcher {
         Imgproc.cvtColor(t, t, Imgproc.COLOR_RGBA2RGB)
         val roi = Mat(src, Rect(r[0], r[1], r[2], r[3]))
         try {
-            if (t.cols() > roi.cols() || t.rows() > roi.rows()) return null
+            if (t.cols() > roi.cols() || t.rows() > roi.rows()) return emptyList()
             val res = Mat()
             Imgproc.matchTemplate(roi, t, res, Imgproc.TM_CCOEFF_NORMED)
             val mm = Core.minMaxLoc(res)
             lastImageScore = mm.maxVal
-            if (mm.maxVal < thr) { res.release(); return null }
+            if (mm.maxVal < thr) { res.release(); return emptyList() }
             // 达标的全部位置
             val mask = Mat()
             Core.compare(res, Scalar(thr), mask, Core.CMP_GE)
@@ -88,10 +92,11 @@ object Matcher {
             val rawList = pts.toList()
             mask.release(); pts.release()
             if (rawList.size > 2000) {   // 模板太通用（如纯色块）到处都达标，退回单点最佳
-                AppLog.w("匹配", "扎堆模式：达标点过多（${rawList.size}），退回单点最佳")
+                AppLog.w("匹配", "连片模式：达标点过多（${rawList.size}），退回单点最佳")
                 val p = Point(r[0] + mm.maxLoc.x.toInt() + t.cols() / 2, r[1] + mm.maxLoc.y.toInt() + t.rows() / 2)
                 res.release()
-                return p
+                lastClusterSize = 1
+                return listOf(Comp(p, 1, mm.maxVal))
             }
             // 达标点太多时只留分数最高的 600 个再做 NMS：板子越满达标点越多，抑制和计数的 O(n²) 循环会把每轮从 1.5 秒拖到 3 秒多
             val scored = rawList.map { p ->
@@ -111,27 +116,49 @@ object Matcher {
                 }
                 if (!dup) accepted.add(p)
             }
-            if (accepted.isEmpty()) return null
-            // 扎堆计数：半径内同类数量
-            val radius = maxOf(t.cols(), t.rows()) * 1.6
-            val radius2 = radius * radius
-            var best: Triple<Int, Int, Double>? = null
-            var bestCount = -1
-            for (a in accepted) {
-                var count = 0
-                for (b in accepted) {
-                    if (b === a) continue
-                    val dx = (a.first - b.first).toDouble()
-                    val dy = (a.second - b.second).toDouble()
-                    if (dx * dx + dy * dy <= radius2) count++
-                }
-                if (count > bestCount || (count == bestCount && best != null && a.third > best.third)) {
-                    best = a; bestCount = count
-                }
+            if (accepted.isEmpty()) return emptyList()
+            // 估算格距：每个点到最近邻的距离取中位数
+            val step = if (accepted.size >= 3) {
+                val nn = accepted.map { a ->
+                    accepted.filter { it !== a }.minOf { b ->
+                        val dx = (a.first - b.first).toDouble()
+                        val dy = (a.second - b.second).toDouble()
+                        kotlin.math.sqrt(dx * dx + dy * dy)
+                    }
+                }.sorted()
+                nn[nn.size / 2].coerceIn(200.0, 300.0)
+            } else 240.0
+            // 连片（BFS）：上下左右相连才算一伙
+            fun adjacent(a: Triple<Int, Int, Double>, b: Triple<Int, Int, Double>): Boolean {
+                val dx = kotlin.math.abs(a.first - b.first).toDouble()
+                val dy = kotlin.math.abs(a.second - b.second).toDouble()
+                return (dx in step * 0.75..step * 1.25 && dy <= step * 0.25) ||
+                       (dy in step * 0.75..step * 1.25 && dx <= step * 0.25)
             }
-            lastClusterSize = bestCount + 1   // 含自己
-            val b = best ?: return null
-            return Point(r[0] + b.first + t.cols() / 2, r[1] + b.second + t.rows() / 2)
+            val visited = BooleanArray(accepted.size)
+            val comps = ArrayList<Comp>()
+            for (i in accepted.indices) {
+                if (visited[i]) continue
+                val group = ArrayList<Int>()
+                val stack = ArrayDeque<Int>()
+                stack.add(i); visited[i] = true
+                while (stack.isNotEmpty()) {
+                    val cur = stack.removeLast()
+                    group.add(cur)
+                    for (j in accepted.indices) {
+                        if (!visited[j] && adjacent(accepted[cur], accepted[j])) {
+                            visited[j] = true; stack.add(j)
+                        }
+                    }
+                }
+                val top = group.map { accepted[it] }.minWithOrNull(compareBy({ it.second }, { it.first }))!!
+                comps.add(Comp(
+                    Point(r[0] + top.first + t.cols() / 2, r[1] + top.second + t.rows() / 2),
+                    group.size, top.third
+                ))
+            }
+            lastClusterSize = comps.maxOf { it.size }   // 供日志兜底用；真正点的那伙由调用方按 Comp 取
+            return comps
         } finally {
             roi.release(); src.release(); t.release()
         }
