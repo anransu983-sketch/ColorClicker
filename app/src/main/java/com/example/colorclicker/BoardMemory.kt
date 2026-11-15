@@ -196,7 +196,10 @@ object BoardMemory {
         }
     }
 
-    const val HZ_CAP = 3   // Runner 同口径：余量 ≥ 3 次施法的视为一样安全
+    // 0.33 HZ_CAP 3 → 6（只改选点）：封顶 3 会把余量 3/4/5/6/∞ 的候选当成一样安全，再按只数选，
+    // 等于在“能多活几次施法”这一项上不分高下；模拟里余量封顶 ≥6 与不封顶等效，比封顶 3 多拿 3%~17% 总只数。
+    // Runner 与影子前瞻同用这个值（Runner 里 HZ_CAP = BoardMemory.HZ_CAP），不用另改。
+    const val HZ_CAP = 6
 
     /** 模拟：点掉 tapped 一伙后其余上移一格。返回（是否有怪越线，下轮最大一伙只数）。 */
     private fun simulateNext(actual: List<Cell>, tapped: Matcher.Comp, tappedName: String): Pair<Boolean, Double> {
