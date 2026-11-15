@@ -13,8 +13,8 @@ android {
         applicationId = "com.example.colorclicker"
         minSdk = 30
         targetSdk = 34
-        versionCode = 25
-        versionName = "0.24"
+        versionCode = 26
+        versionName = "0.25"
     }
     // 固定签名：signing.properties（本机）或 CI secret 解出的同名文件提供密码，
     // keystore 在 ~/workspace/keys/colorclicker-release.keystore（不进仓库）。

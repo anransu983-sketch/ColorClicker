@@ -58,6 +58,17 @@ class ClickService : AccessibilityService() {
             }
         }
 
+        /** 按一次系统返回键（用于关结算页这类没有按钮的画面） */
+        fun back(): Boolean {
+            val s = instance ?: return false
+            return try {
+                s.performGlobalAction(AccessibilityService.GLOBAL_ACTION_BACK)
+            } catch (e: Exception) {
+                AppLog.e("点击", "返回键失败", e)
+                false
+            }
+        }
+
         /** 往当前可输入的框里写文字（用前先点一下输入框获得焦点）：返回是否成功。
          *  注意：游戏自绘的输入框可能不暴露给无障碍，找不到框时会记日志说明。 */
         fun inputText(text: String): Boolean {
