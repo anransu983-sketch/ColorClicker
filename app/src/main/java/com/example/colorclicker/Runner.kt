@@ -98,7 +98,7 @@ object Runner {
         if (r.type == "color") {
             AppLog.d("匹配", "规则「${r.name}」找色 ${r.colorHex} ±${r.tolerance} → 命中 (${p.x},${p.y})，点击 ($tx,$ty)", tx, ty)
         } else {
-            AppLog.d("匹配", "规则「${r.name}」找图 相似度 ${"%.3f".format(Matcher.lastImageScore)} ≥ ${r.threshold} → 命中 (${p.x},${p.y})，点击 ($tx,$ty)", tx, ty)
+            AppLog.d("匹配", "规则「${r.name}」找图 相似度 ${"%.3f".format(Matcher.lastImageScore)} ≥ ${r.threshold} → 命中 (${p.x},${p.y})，点击 ($tx,$ty)" + if (r.clusterFirst) "（扎堆 ${Matcher.lastClusterSize} 只）" else "", tx, ty)
         }
     }
 
@@ -117,7 +117,8 @@ object Runner {
             if (tpl == null) {
                 AppLog.e("匹配", "规则「${r.name}」模板图读不到：${r.templatePath}")
                 null
-            } else Matcher.findImage(frame, tpl, r.threshold, r.region)
+            } else if (r.clusterFirst) Matcher.findImageCluster(frame, tpl, r.threshold, r.region)
+            else Matcher.findImage(frame, tpl, r.threshold, r.region)
         }
     } catch (e: Exception) {
         AppLog.e("匹配", "规则「${r.name}」匹配异常", e)

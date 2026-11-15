@@ -131,6 +131,7 @@ class MainActivity : ComponentActivity() {
                                 Text(
                                     (if (r.type == "color") "找色 ${r.colorHex} ±${r.tolerance}"
                                     else "找图 相似度≥${r.threshold}") +
+                                    (if (r.clusterFirst) "·扎堆优先" else "") +
                                     (if (r.inputText.isNotBlank()) " → 输入「${r.inputText}」" else ""),
                                     style = MaterialTheme.typography.bodySmall
                                 )
@@ -207,6 +208,7 @@ class MainActivity : ComponentActivity() {
         var ox by remember { mutableStateOf("0") }
         var oy by remember { mutableStateOf("0") }
         var input by remember { mutableStateOf("") }
+        var cluster by remember { mutableStateOf(false) }
         var tpl by remember { mutableStateOf(Pick.cropPath ?: "") }
         val picker = rememberLauncherForActivityResult(ActivityResultContracts.GetContent()) { uri ->
             if (uri != null) tpl = saveTemplate(ctx, uri)
@@ -236,6 +238,7 @@ class MainActivity : ComponentActivity() {
                         OutlinedButton({ picker.launch("image/*") }) { Text("或从相册选择") }
                         if (tpl.isNotEmpty()) Text("模板图已选择 ✓")
                         OutlinedTextField(thr, { thr = it }, label = { Text("相似度 0-1") })
+                        FilterChip(cluster, { cluster = !cluster }, { Text("优先点扎堆") })
                     }
                     OutlinedTextField(region, { region = it }, label = { Text("区域 x,y,w,h（留空=全屏）") })
                     OutlinedButton({
@@ -260,7 +263,7 @@ class MainActivity : ComponentActivity() {
                             region = region.split(",").mapNotNull { it.trim().toIntOrNull() }.takeIf { it.size == 4 },
                             offsetX = ox.toIntOrNull() ?: 0, offsetY = oy.toIntOrNull() ?: 0,
                             delayMs = delay.toLongOrNull() ?: 1000,
-                            inputText = input,
+                            inputText = input, clusterFirst = cluster,
                         )
                     )
                 }) { Text("保存") }

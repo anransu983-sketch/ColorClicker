@@ -18,6 +18,7 @@ data class Rule(
     val offsetY: Int = 0,
     val delayMs: Long = 1000,         // 点击后等待
     val inputText: String = "",       // 命中点击后输入的文字（空=不输入）
+    val clusterFirst: Boolean = false, // 找图时优先点扎堆最多的那只
     val enabled: Boolean = true,
 ) {
     fun toJson() = JSONObject().apply {
@@ -26,7 +27,8 @@ data class Rule(
         put("templatePath", templatePath); put("threshold", threshold)
         put("region", region?.let { JSONArray(it) } ?: JSONObject.NULL)
         put("offsetX", offsetX); put("offsetY", offsetY)
-        put("delayMs", delayMs); put("inputText", inputText); put("enabled", enabled)
+        put("delayMs", delayMs); put("inputText", inputText)
+        put("clusterFirst", clusterFirst); put("enabled", enabled)
     }
 
     companion object {
@@ -37,6 +39,7 @@ data class Rule(
             region = o.optJSONArray("region")?.let { a -> List(a.length()) { a.getInt(it) } },
             offsetX = o.optInt("offsetX", 0), offsetY = o.optInt("offsetY", 0),
             delayMs = o.optLong("delayMs", 1000), inputText = o.optString("inputText", ""),
+            clusterFirst = o.optBoolean("clusterFirst", false),
             enabled = o.optBoolean("enabled", true),
         )
     }
