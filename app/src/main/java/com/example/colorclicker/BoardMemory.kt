@@ -293,6 +293,25 @@ object BoardMemory {
         predicted = emptyList()
     }
 
+    /** 给界面看的累计摘要（主界面「查看记忆学习」用）；没打过任何一局返回 null。 */
+    fun summaryText(ctx: Context): String? {
+        load(ctx)
+        if (battles == 0 && cumCasts == 0) return null
+        val rate = if (cumPredTotal > 0) "%.1f%%".format(100.0 * cumPredHit / cumPredTotal) else "—"
+        val topRate = if (cumTopTotal > 0) "%.1f%%".format(100.0 * cumTopHit / cumTopTotal) else "—"
+        val sb = StringBuilder()
+        sb.append("累计 $battles 局，施法 $cumCasts 次，记消 $cumKills 只\n")
+        sb.append("棋盘预测命中 $cumPredHit/$cumPredTotal（$rate），上部（排≤4）$cumTopHit/$cumTopTotal（$topRate）\n")
+        sb.append("点后核实清掉 $cumVerified 只，预测有而实测无 $cumVanished 格，漏数嫌疑 $cumSuspect 格\n")
+        sb.append("期限优先改点 $cumOverrides 次；影子前瞻分歧 $cumDivN 次")
+        if (cumDivN > 0) sb.append("（平均差 +${"%.2f".format(cumDivGain / cumDivN)}）")
+        sb.append("，仍在影子模式，没改决策\n")
+        val sim = typeStats.entries.sortedBy { it.key }
+            .joinToString("\n") { "「${it.key.removePrefix("守卫-")}」出现 ${it.value.n} 次，均值 ${"%.2f".format(it.value.avg)}，最低 ${"%.2f".format(it.value.min)}" }
+        if (sim.isNotEmpty()) sb.append("相似度累计：\n$sim")
+        return sb.toString()
+    }
+
     private fun memFile(ctx: Context) = File(ctx.filesDir, "guard_memory.json")
 
     private fun load(ctx: Context) {

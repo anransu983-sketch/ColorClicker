@@ -19,9 +19,10 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.window.Dialog
 import androidx.compose.ui.window.DialogProperties
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 
-private val TAGS = listOf("全部", "截图", "匹配", "点击", "规则", "服务", "启动", "崩溃")
+private val TAGS = listOf("全部", "截图", "匹配", "点击", "规则", "服务", "启动", "崩溃", "记忆", "守卫", "性能", "复盘")
 
 private fun levelColor(level: String) = when (level) {
     "ERROR" -> Color(0xFFD32F2F)
@@ -38,11 +39,25 @@ fun LogScreen(onDismiss: () -> Unit) {
     var tag by remember { mutableStateOf("全部") }
     var onlyErrors by remember { mutableStateOf(false) }
     var autoScroll by remember { mutableStateOf(true) }
+    var recentOnly by remember { mutableStateOf(false) }
+    var tick by remember { mutableIntStateOf(0) }
     val listState = rememberLazyListState()
 
-    val shown = remember(AppLog.lines.size, tag, onlyErrors) {
+    // 近5分钟开着时每 15 秒重算一次，否则旧日志会一直赖在列表里
+    LaunchedEffect(recentOnly) {
+        if (recentOnly) {
+            while (true) {
+                delay(15_000)
+                tick++
+            }
+        }
+    }
+
+    val shown = remember(AppLog.lines.size, tag, onlyErrors, recentOnly, tick) {
+        val cutoff = System.currentTimeMillis() - 5 * 60 * 1000
         AppLog.lines.filter {
-            (tag == "全部" || it.tag == tag) && (!onlyErrors || it.level == "ERROR" || it.level == "WARN")
+            (tag == "全部" || it.tag == tag) && (!onlyErrors || it.level == "ERROR" || it.level == "WARN") &&
+                (!recentOnly || it.time >= cutoff)
         }
     }
 
@@ -74,6 +89,7 @@ fun LogScreen(onDismiss: () -> Unit) {
                         Checkbox(autoScroll, { autoScroll = it })
                         Text("自动滚到底", fontSize = 13.sp)
                     }
+                    FilterChip(recentOnly, { recentOnly = !recentOnly }, { Text("近5分钟") })
                 }
                 Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                     OutlinedButton({
@@ -93,7 +109,7 @@ fun LogScreen(onDismiss: () -> Unit) {
                 Spacer(Modifier.height(8.dp))
                 if (shown.isEmpty()) {
                     Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
-                        Text("暂无日志", color = Color.Gray)
+                        Text(if (recentOnly) "近5分钟内暂无日志" else "暂无日志", color = Color.Gray)
                     }
                 } else {
                     LazyColumn(state = listState, modifier = Modifier.fillMaxSize(), verticalArrangement = Arrangement.spacedBy(2.dp)) {

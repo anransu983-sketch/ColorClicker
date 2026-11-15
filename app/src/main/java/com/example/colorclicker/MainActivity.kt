@@ -68,6 +68,8 @@ class MainActivity : ComponentActivity() {
         val rules = remember { mutableStateListOf<Rule>().apply { addAll(RuleStore.load(ctx)) } }
         var showAdd by remember { mutableStateOf(false) }
         var showLog by remember { mutableStateOf(false) }
+        var showMemory by remember { mutableStateOf(false) }
+        val memText = remember(showMemory) { if (showMemory) BoardMemory.summaryText(ctx) else null }
         var updateInfo by remember { mutableStateOf<Updater.UpdateInfo?>(null) }
         var updateProgress by remember { mutableStateOf(-1) }   // -1 未下载，0~100 下载中
         var updateError by remember { mutableStateOf("") }
@@ -96,6 +98,7 @@ class MainActivity : ComponentActivity() {
                         }) { Text("2. 授权悬浮窗") }
                         Button({ startProjection() }) { Text("3. 授权截屏并启动") }
                         OutlinedButton({ showLog = true }) { Text("查看详细日志") }
+                        OutlinedButton({ showMemory = true }) { Text("查看记忆学习") }
                         OutlinedButton({
                             updateChecked = true; updateError = ""
                             scope.launch(kotlinx.coroutines.Dispatchers.IO) {
@@ -149,7 +152,7 @@ class MainActivity : ComponentActivity() {
                             Toast.makeText(ctx, if (added + updated > 0) "内置规则已同步（新增 $added，更新 $updated）" else "内置规则已是最新", Toast.LENGTH_SHORT).show()
                         }) { Text("加载守卫城邦内置规则") }
                         Button({ GuardScript.toggle(ctx) }) { Text("一键守卫城邦") }
-                        Text("在挑战页点它：自动进场→点颜色辅助→开跑一局（只点免费，不点钻石）", style = MaterialTheme.typography.bodySmall)
+                        Text("在挑战页点它：自动进场→免费（没次数就点钻石×100）→关介绍→点颜色辅助→开跑一局", style = MaterialTheme.typography.bodySmall)
                     }
                 }
                 item { Text("规则（从上到下依次检测，命中即点击）", style = MaterialTheme.typography.titleSmall) }
@@ -187,6 +190,18 @@ class MainActivity : ComponentActivity() {
             showAdd = false
         }
         if (showLog) LogScreen { showLog = false }
+        if (showMemory) {
+            AlertDialog(
+                onDismissRequest = { showMemory = false },
+                title = { Text("记忆学习（累计）") },
+                text = {
+                    Text(
+                        memText ?: "还没打过一局，记忆是空的。\n打完一局后回来这里看累计；单局的本局记忆、核实对账在日志里，分类选「记忆」就能只看它。"
+                    )
+                },
+                confirmButton = { TextButton({ showMemory = false }) { Text("知道了") } }
+            )
+        }
         updateInfo?.let { info ->
             AlertDialog(
                 onDismissRequest = { if (updateProgress < 0) updateInfo = null },
