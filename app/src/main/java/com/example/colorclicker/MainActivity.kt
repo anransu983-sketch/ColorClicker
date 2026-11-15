@@ -120,6 +120,26 @@ class MainActivity : ComponentActivity() {
                             )
                             Text("次（0=无限）", style = MaterialTheme.typography.bodySmall)
                         }
+                        OutlinedButton({
+                            val builtins = listOf(
+                                Triple("builtin_potato", "守卫-土豆怪", "tpl_potato.png"),
+                                Triple("builtin_slime", "守卫-史莱姆", "tpl_slime.png"),
+                                Triple("builtin_scorpion", "守卫-蝎子", "tpl_scorpion.png"),
+                            )
+                            var added = 0
+                            for ((id, name, asset) in builtins) {
+                                if (rules.any { it.id == id }) continue
+                                val f = File(ctx.filesDir, asset)
+                                ctx.assets.open(asset).use { input ->
+                                    f.outputStream().use { output -> input.copyTo(output) }
+                                }
+                                rules.add(Rule(id = id, name = name, type = "image", templatePath = f.absolutePath, threshold = 0.8, clusterFirst = true, delayMs = 1000))
+                                added++
+                            }
+                            persist()
+                            AppLog.i("规则", "已加载守卫城邦内置规则 $added 条（土豆怪/史莱姆/蝎子，扎堆优先）")
+                            Toast.makeText(ctx, if (added > 0) "已加载 $added 条内置规则" else "内置规则已加载过", Toast.LENGTH_SHORT).show()
+                        }) { Text("加载守卫城邦内置规则") }
                     }
                 }
                 item { Text("规则（从上到下依次检测，命中即点击）", style = MaterialTheme.typography.titleSmall) }
