@@ -16,6 +16,9 @@ object Runner {
 
     fun isRunning() = job?.isActive == true
 
+    /** 扎堆比数量的结果：规则、点、该规则的相似度、能消只数 */
+    private data class ClusterPick(val rule: Rule, val point: Point, val score: Double, val count: Int)
+
     /** 返回切换后是否在运行 */
     fun toggle(ctx: Context): Boolean {
         if (isRunning()) { stop(); return false }
@@ -80,8 +83,7 @@ object Runner {
                 if (!acted && clusterRules.isNotEmpty()) {
                     val best = matchClusterRound(frame, clusterRules)
                     if (best != null) {
-                        val (r, p) = best
-                        val n = doTap(r, p, maxClicks, clicks)
+                        val n = doTap(best.rule, best.point, maxClicks, clicks, best.score, best.count)
                         if (n < 0) { stop(); return@launch }
                         clicks = n
                         acted = true
@@ -101,9 +103,10 @@ object Runner {
         }
     }
 
-    /** 点击一条规则：记日志、点、等、写字、记次数；返回新次数，-1 表示应停止（手势失败或到循环上限） */
-    private suspend fun doTap(r: Rule, p: Point, maxClicks: Int, clicks: Int): Int {
-        logHit(r, p)
+    /** 点击一条规则：记日志、点、等、写字、记次数；返回新次数，-1 表示应停止（手势失败或到循环上限）。
+     *  score/cluster 由调用方在匹配当刻抓取传入（比数量那轮会改写 Matcher 的共享值，事后读就串了）。 */
+    private suspend fun doTap(r: Rule, p: Point, maxClicks: Int, clicks: Int, score: Double? = null, cluster: Int? = null): Int {
+        logHit(r, p, score, cluster)
         val tx = p.x + r.offsetX
         val ty = p.y + r.offsetY
         val ok = ClickService.tap(tx, ty)
@@ -126,8 +129,8 @@ object Runner {
         return n
     }
 
-    /** 扎堆规则比数量：每条都扫一遍，返回能消最多那只（规则，点）；数量相同比相似度，再相同按规则顺序 */
-    private fun matchClusterRound(frame: Bitmap, clusterRules: List<Rule>): Pair<Rule, Point>? {
+    /** 扎堆规则比数量：每条都扫一遍，返回能消最多那只（规则，点，相似度，只数）；数量相同比相似度，再相同按规则顺序 */
+    private fun matchClusterRound(frame: Bitmap, clusterRules: List<Rule>): ClusterPick? {
         var bestRule: Rule? = null
         var bestPoint: Point? = null
         var bestCount = 0
@@ -156,16 +159,18 @@ object Runner {
             return null
         }
         AppLog.d("匹配", "$summary → 点「${bestRule.name}」（扎堆 $bestCount 只，相似度 ${"%.3f".format(bestScore)}）")
-        return Pair(bestRule, bestPoint)
+        return ClusterPick(bestRule, bestPoint, bestScore, bestCount)
     }
 
-    private fun logHit(r: Rule, p: Point) {
+    private fun logHit(r: Rule, p: Point, score: Double? = null, cluster: Int? = null) {
         val tx = p.x + r.offsetX
         val ty = p.y + r.offsetY
         if (r.type == "color") {
             AppLog.d("匹配", "规则「${r.name}」找色 ${r.colorHex} ±${r.tolerance} → 命中 (${p.x},${p.y})，点击 ($tx,$ty)", tx, ty)
         } else {
-            AppLog.d("匹配", "规则「${r.name}」找图 相似度 ${"%.3f".format(Matcher.lastImageScore)} ≥ ${r.threshold} → 命中 (${p.x},${p.y})，点击 ($tx,$ty)" + if (r.clusterFirst) "（扎堆 ${Matcher.lastClusterSize} 只）" else "", tx, ty)
+            val s = score ?: Matcher.lastImageScore
+            val c = cluster ?: Matcher.lastClusterSize
+            AppLog.d("匹配", "规则「${r.name}」找图 相似度 ${"%.3f".format(s)} ≥ ${r.threshold} → 命中 (${p.x},${p.y})，点击 ($tx,$ty)" + if (r.clusterFirst) "（扎堆 $c 只）" else "", tx, ty)
         }
     }
 
