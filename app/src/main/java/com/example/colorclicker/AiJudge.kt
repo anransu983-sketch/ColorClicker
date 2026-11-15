@@ -18,22 +18,28 @@ import java.net.URL
 /**
  * 0.26 AI 判点（Gemini 免费版）：
  * 每轮把棋盘图（裁成 y≥1100 的棋盘区、缩到宽 720、画上列号/行号）+ 候选清单发给
- * Gemini 2.5 Flash（Google AI Studio 免费额度：约 10 次/分钟，每天几百到一千多次），
- * 模型只回 JSON：{"pick": 候选编号, "unknown": {col,row,desc} 或 null}。
+ * Gemini（Google AI Studio 免费额度），模型只回 JSON：{"pick": 候选编号, "unknown": {col,row,desc} 或 null}。
  * 任何失败（没网、超时、429、格式错、没填 key）都返回 null，调用方退回期限规则，
  * 绝不因为 AI 掉线就卡死。Key 只存在本机 SharedPreferences，不上传别处。
  * 注意：免费额度下发给 Google 的内容可能被用于训练——这里只发游戏棋盘图，没有隐私信息。
+ * 模型（0.27）：默认 gemini-3.5-flash-lite（免费 15 次/分钟、每天 500 次，一局约 30 次，
+ * 够打十几局）；gemini-3.8-flash 更强但每天只有 20 次（约一局），在主界面模型名里改。
+ * 教训：gemini-2.5-flash 已对新用户下线（2026-11-15 第 10 局实测全轮 404），所以模型名做成
+ * 可配的，下次 Google 再换名不用重新发版。
  */
 object AiJudge {
     private const val PREFS = "ai_judge"
     private const val KEY_API_KEY = "gemini_api_key"
     private const val KEY_ENABLED = "ai_enabled"
-    private const val MODEL = "gemini-2.5-flash"
-    private const val ENDPOINT = "https://generativelanguage.googleapis.com/v1beta/models/$MODEL:generateContent"
+    private const val KEY_MODEL = "gemini_model"
+    /** 默认模型：免费 15 次/分钟、每天 500 次；3.8-flash 每天只有 20 次，不适合每轮都判 */
+    private const val DEFAULT_MODEL = "gemini-3.5-flash-lite"
+    private fun endpoint(model: String) =
+        "https://generativelanguage.googleapis.com/v1beta/models/$model:generateContent"
     private const val TIMEOUT_MS = 30_000
     private const val CONNECT_TIMEOUT_MS = 10_000
-    /** 免费额度约 10 次/分钟：两次判点至少隔这么久，免得 429 */
-    private const val MIN_GAP_MS = 6_000L
+    /** 两次判点至少隔这么久，免得 429：lite 15 次/分钟→4 秒；flash 5 次/分钟→12 秒 */
+    private fun minGapMs(model: String) = if (model.contains("lite", ignoreCase = true)) 4_000L else 12_000L
     private var lastJudgeAt = 0L
 
     fun getApiKey(ctx: Context): String =
@@ -41,6 +47,15 @@ object AiJudge {
 
     fun setApiKey(ctx: Context, key: String) {
         ctx.getSharedPreferences(PREFS, Context.MODE_PRIVATE).edit().putString(KEY_API_KEY, key.trim()).apply()
+    }
+
+    fun getModel(ctx: Context): String {
+        val m = ctx.getSharedPreferences(PREFS, Context.MODE_PRIVATE).getString(KEY_MODEL, "") ?: ""
+        return if (m.isBlank()) DEFAULT_MODEL else m.trim()
+    }
+
+    fun setModel(ctx: Context, model: String) {
+        ctx.getSharedPreferences(PREFS, Context.MODE_PRIVATE).edit().putString(KEY_MODEL, model.trim()).apply()
     }
 
     fun isEnabled(ctx: Context): Boolean =
@@ -119,10 +134,12 @@ object AiJudge {
     /** 发一轮判点。成功返回 Verdict；任何失败返回 null（调用方退回期限规则）。 */
     suspend fun judge(ctx: Context, frame: Bitmap, cands: List<Candidate>): Verdict? {
         val key = getApiKey(ctx)
+        val model = getModel(ctx)
         if (key.isBlank() || cands.isEmpty()) return null
-        // 免费额度 10 次/分钟：节流，避免 429
+        // 按模型节流，避免 429
         val gap = System.currentTimeMillis() - lastJudgeAt
-        if (gap < MIN_GAP_MS) delay(MIN_GAP_MS - gap)
+        val minGap = minGapMs(model)
+        if (gap < minGap) delay(minGap - gap)
         lastJudgeAt = System.currentTimeMillis()
         return withContext(Dispatchers.IO) {
             try {
@@ -146,7 +163,7 @@ object AiJudge {
                         put("maxOutputTokens", 400)
                     })
                 }
-                val conn = (URL(ENDPOINT).openConnection() as HttpURLConnection).apply {
+                val conn = (URL(endpoint(model)).openConnection() as HttpURLConnection).apply {
                     requestMethod = "POST"
                     setRequestProperty("Content-Type", "application/json")
                     setRequestProperty("x-goog-api-key", key)

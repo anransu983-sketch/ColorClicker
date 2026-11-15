@@ -77,6 +77,7 @@ class MainActivity : ComponentActivity() {
         var updateChecked by remember { mutableStateOf(false) }
         var loopLimit by remember { mutableStateOf(RuleStore.getLoopLimit(ctx).toString()) }
         var aiKey by remember { mutableStateOf(AiJudge.getApiKey(ctx)) }
+        var aiModel by remember { mutableStateOf(AiJudge.getModel(ctx)) }
         var aiOn by remember { mutableStateOf(AiJudge.isEnabled(ctx)) }
         fun persist() = RuleStore.save(ctx, rules.toList())
 
@@ -164,6 +165,12 @@ class MainActivity : ComponentActivity() {
                             modifier = Modifier.fillMaxWidth(), singleLine = true,
                             visualTransformation = PasswordVisualTransformation()
                         )
+                        OutlinedTextField(
+                            aiModel,
+                            { v -> aiModel = v; AiJudge.setModel(ctx, v) },
+                            label = { Text("模型名") },
+                            modifier = Modifier.fillMaxWidth(), singleLine = true
+                        )
                         Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                             Text("AI 判点")
                             Switch(aiOn, { on ->
@@ -172,7 +179,7 @@ class MainActivity : ComponentActivity() {
                             })
                             Text(if (aiOn) "开" else "关", style = MaterialTheme.typography.bodySmall)
                         }
-                        Text("Key 在 Google AI Studio 免费领：aistudio.google.com → Create API Key，粘贴进来就行，不用绑卡。每轮棋盘图发给 Gemini 判点第几伙（只发游戏画面），超时 30 秒自动退回期限规则；谷歌不通时日志里会报 AI判点调用失败，先开梦盒代理再打。", style = MaterialTheme.typography.bodySmall)
+                        Text("Key 在 Google AI Studio 免费领：aistudio.google.com → Create API Key，粘贴进来就行，不用绑卡。模型默认 gemini-3.5-flash-lite（免费每天 500 次，够打十几局）；想换更强的 gemini-3.8-flash 也行，但每天只有 20 次（约一局）。每轮棋盘图发给 Gemini 判点第几伙（只发游戏画面），超时 30 秒自动退回期限规则；谷歌不通时日志里会报 AI判点调用失败，先开梦盒代理再打。", style = MaterialTheme.typography.bodySmall)
                     }
                 }
                 item { Text("规则（从上到下依次检测，命中即点击）", style = MaterialTheme.typography.titleSmall) }
