@@ -93,10 +93,10 @@ object Matcher {
                 res.release()
                 return p
             }
-            // 每点取分数，按分数降序
+            // 达标点太多时只留分数最高的 600 个再做 NMS：板子越满达标点越多，抑制和计数的 O(n²) 循环会把每轮从 1.5 秒拖到 3 秒多
             val scored = rawList.map { p ->
                 Triple(p.x.toInt(), p.y.toInt(), res.get(p.y.toInt(), p.x.toInt())[0])
-            }.sortedByDescending { it.third }
+            }.sortedByDescending { it.third }.let { if (it.size > 600) it.take(600) else it }
             res.release()
             // 非极大值抑制：同一只怪物的多次命中只留分数最高的一个
             val minDist = maxOf(t.cols(), t.rows()) * 0.75

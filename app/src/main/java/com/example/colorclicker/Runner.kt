@@ -19,8 +19,8 @@ object Runner {
     /** 扎堆比数量的结果：规则、点、该规则的相似度、能消只数 */
     private data class ClusterPick(val rule: Rule, val point: Point, val score: Double, val count: Int)
 
-    /** y 小于此值视为靠近城墙（城墙在画面顶部约 y 1200，怪物行距约 260，y < 1900 是最上面两排） */
-    private val DANGER_Y = 1900
+    /** y 小于此值视为靠近城墙（城墙在画面顶部约 y 1200，怪物行距约 260，y < 2300 是最上面三排） */
+    private val DANGER_Y = 2300
 
     /** 返回切换后是否在运行 */
     fun toggle(ctx: Context): Boolean {
@@ -148,7 +148,7 @@ object Runner {
             }
             val c = if (p == null) 0 else Matcher.lastClusterSize
             val s = Matcher.lastImageScore
-            counts.add("${r.name} ${c}只")
+            counts.add("${r.name} ${c}只" + if (p != null) "(y${p.y})" else "")
             if (p != null) candidates.add(ClusterPick(r, p, s, c))
         }
         val summary = "本轮比数量：${counts.joinToString(" / ")}"
