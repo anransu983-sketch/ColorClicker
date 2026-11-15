@@ -19,6 +19,9 @@ object Runner {
     /** 扎堆比数量的结果：规则、点、该规则的相似度、能消只数 */
     private data class ClusterPick(val rule: Rule, val point: Point, val score: Double, val count: Int)
 
+    /** y 小于此值视为靠近城墙（城墙在画面顶部约 y 1200，怪物行距约 260，y < 1900 是最上面两排） */
+    private val DANGER_Y = 1900
+
     /** 返回切换后是否在运行 */
     fun toggle(ctx: Context): Boolean {
         if (isRunning()) { stop(); return false }
@@ -129,12 +132,9 @@ object Runner {
         return n
     }
 
-    /** 扎堆规则比数量：每条都扫一遍，返回能消最多那只（规则，点，相似度，只数）；数量相同比相似度，再相同按规则顺序 */
+    /** 扎堆规则比数量：每条都扫一遍。靠近城墙的先杀（不管扎堆，离城墙最近的那只）；离得远的才比数量，数量相同比相似度，再相同按规则顺序 */
     private fun matchClusterRound(frame: Bitmap, clusterRules: List<Rule>): ClusterPick? {
-        var bestRule: Rule? = null
-        var bestPoint: Point? = null
-        var bestCount = 0
-        var bestScore = -1.0
+        val candidates = ArrayList<ClusterPick>()
         val counts = ArrayList<String>()
         for (r in clusterRules) {
             val tpl = tplCache.getOrPut(r.templatePath) { BitmapFactory.decodeFile(r.templatePath) }
@@ -149,17 +149,24 @@ object Runner {
             val c = if (p == null) 0 else Matcher.lastClusterSize
             val s = Matcher.lastImageScore
             counts.add("${r.name} ${c}只")
-            if (p != null && (c > bestCount || (c == bestCount && s > bestScore))) {
-                bestRule = r; bestPoint = p; bestCount = c; bestScore = s
-            }
+            if (p != null) candidates.add(ClusterPick(r, p, s, c))
         }
         val summary = "本轮比数量：${counts.joinToString(" / ")}"
-        if (bestRule == null || bestPoint == null) {
+        if (candidates.isEmpty()) {
             AppLog.d("匹配", "$summary → 都没找到")
             return null
         }
-        AppLog.d("匹配", "$summary → 点「${bestRule.name}」（扎堆 $bestCount 只，相似度 ${"%.3f".format(bestScore)}）")
-        return ClusterPick(bestRule, bestPoint, bestScore, bestCount)
+        val danger = candidates.filter { it.point.y < DANGER_Y }
+        val best = if (danger.isNotEmpty()) {
+            val d = danger.minByOrNull { it.point.y }!!
+            AppLog.d("匹配", "$summary → 点「${d.rule.name}」（离城墙最近 y ${d.point.y}，扎堆 ${d.count} 只，相似度 ${"%.3f".format(d.score)}）")
+            d
+        } else {
+            val b = candidates.maxWithOrNull(compareBy<ClusterPick> { it.count }.thenBy { it.score })!!
+            AppLog.d("匹配", "$summary → 点「${b.rule.name}」（扎堆 ${b.count} 只，相似度 ${"%.3f".format(b.score)}）")
+            b
+        }
+        return best
     }
 
     private fun logHit(r: Rule, p: Point, score: Double? = null, cluster: Int? = null) {

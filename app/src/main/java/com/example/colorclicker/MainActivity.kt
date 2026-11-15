@@ -127,18 +127,20 @@ class MainActivity : ComponentActivity() {
                                 Triple("builtin_scorpion", "守卫-蝎子", "tpl_scorpion.png"),
                             )
                             var added = 0
+                            var updated = 0
                             for ((id, name, asset) in builtins) {
-                                if (rules.any { it.id == id }) continue
                                 val f = File(ctx.filesDir, asset)
                                 ctx.assets.open(asset).use { input ->
                                     f.outputStream().use { output -> input.copyTo(output) }
                                 }
-                                rules.add(Rule(id = id, name = name, type = "image", templatePath = f.absolutePath, threshold = 0.8, clusterFirst = true, delayMs = 1000))
-                                added++
+                                val idx = rules.indexOfFirst { it.id == id }
+                                val enabled = if (idx >= 0) rules[idx].enabled else true
+                                val fresh = Rule(id = id, name = name, type = "image", templatePath = f.absolutePath, threshold = 0.8, clusterFirst = true, delayMs = 600, enabled = enabled)
+                                if (idx >= 0) { rules[idx] = fresh; updated++ } else { rules.add(fresh); added++ }
                             }
                             persist()
-                            AppLog.i("规则", "已加载守卫城邦内置规则 $added 条（土豆怪/史莱姆/蝎子，扎堆优先）")
-                            Toast.makeText(ctx, if (added > 0) "已加载 $added 条内置规则" else "内置规则已加载过", Toast.LENGTH_SHORT).show()
+                            AppLog.i("规则", "守卫城邦内置规则：新增 $added 条，更新 $updated 条（点后延迟 600ms，靠近城墙的先杀）")
+                            Toast.makeText(ctx, if (added + updated > 0) "内置规则已同步（新增 $added，更新 $updated）" else "内置规则已是最新", Toast.LENGTH_SHORT).show()
                         }) { Text("加载守卫城邦内置规则") }
                     }
                 }
