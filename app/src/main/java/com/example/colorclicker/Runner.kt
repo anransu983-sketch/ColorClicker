@@ -40,6 +40,15 @@ object Runner {
     @Volatile private var noEffectStop = false
     @Volatile private var lastTapAt = 0L
 
+    /** 0.22 防重复点：上次扎堆点击的目标与点之前那盘的签名。棋盘没变又选中同一目标 = 读到的是点之前的旧帧，跳过不点 */
+    private var lastTapRuleId: String? = null
+    private var lastTapPoint: Point? = null
+    private var lastTapBoardSig: String = ""
+    private var pendingBoardSig: String = ""
+    private var repeatSkips = 0
+    /** 0.22 settle 用：点之前那帧的画面签名（72x120 下采样）。等到画面相对它真变了才走 */
+    private var lastTapFrameSig: IntArray? = null
+
     /** 一键守卫交棒用：已在跑返回 true；没跑起来返回 false（调用方记日志）。 */
     fun startBattle(ctx: Context): Boolean {
         if (isRunning()) return true
@@ -120,16 +129,32 @@ object Runner {
 
     private suspend fun settle(first: Bitmap): Bitmap {
         var cur = first
-        var prev = sig(cur)
         var tries = 0
-        while (tries < SETTLE_TRIES) {
-            delay(SETTLE_GAP_MS)
-            val nxt = ScreenGrabber.grab() ?: break
-            val s = sig(nxt)
-            val ch = changedFrac(prev, s)
-            cur = nxt; prev = s
-            tries++
-            if (ch < SETTLE_FRAC) break
+        val ref = lastTapFrameSig
+        if (ref != null && ref.isNotEmpty()) {
+            // 0.22：等到画面相对“点之前那帧”真正变了才走。
+            // 旧逻辑是“画面稳定就走”，但 grab() 没新帧时会复用同一张旧图，变化率 0 也算稳定，
+            // 于是下一轮读到的还是点之前的旧棋盘、把同一伙又点一遍（0.19/0.21 实测每局浪费 2~4 次施法）。
+            while (tries < SETTLE_TRIES) {
+                if (changedFrac(ref, sig(cur)) > SETTLE_FRAC) break
+                delay(SETTLE_GAP_MS)
+                cur = ScreenGrabber.grab() ?: break
+                tries++
+            }
+            if (tries >= SETTLE_TRIES && changedFrac(ref, sig(cur)) <= SETTLE_FRAC) {
+                AppLog.d("匹配", "点后等画面：${SETTLE_TRIES} 帧都没变（帧复用或战斗已结束），继续用当前帧")
+            }
+        } else {
+            var prev = sig(cur)
+            while (tries < SETTLE_TRIES) {
+                delay(SETTLE_GAP_MS)
+                val nxt = ScreenGrabber.grab() ?: break
+                val s = sig(nxt)
+                val ch = changedFrac(prev, s)
+                cur = nxt; prev = s
+                tries++
+                if (ch < SETTLE_FRAC) break
+            }
         }
         if (tries > 1) AppLog.d("匹配", "点后等画面稳定：多截了 $tries 帧（约 ${tries * SETTLE_GAP_MS}ms）")
         return cur
@@ -143,6 +168,7 @@ object Runner {
             AppLog.i("服务", "开始运行：${rules.size} 条启用规则 [${rules.joinToString("、") { it.name }}]，循环 ${if (maxClicks > 0) "$maxClicks 次" else "无限"}" + if (clusterRules.isNotEmpty()) "（扎堆规则每轮比期限再点）" else "")
             if (rules.isEmpty()) AppLog.w("服务", "没有启用的规则，不会执行任何点击")
             lastSig = ""; sameRounds = 0; noEffectStop = false; lastTapAt = 0L
+            lastTapRuleId = null; lastTapPoint = null; lastTapBoardSig = ""; pendingBoardSig = ""; repeatSkips = 0; lastTapFrameSig = null
             BoardMemory.beginBattle(ctx)
             var frameLogged = false
             var nullLogged = false
@@ -172,6 +198,7 @@ object Runner {
                         logMiss(r)
                         continue
                     }
+                    lastTapFrameSig = sig(frame)
                     val n = doTap(r, p, maxClicks, clicks)
                     if (n < 0) { stop(); return@launch }
                     clicks = n
@@ -183,6 +210,7 @@ object Runner {
                     val best = matchClusterRound(frame, clusterRules)
                     if (noEffectStop) { stop(); return@launch }
                     if (best != null) {
+                        lastTapFrameSig = sig(frame)
                         val n = doTap(best.rule, best.point, maxClicks, clicks, best.score, best.count)
                         if (n < 0) { stop(); return@launch }
                         clicks = n
@@ -220,6 +248,13 @@ object Runner {
             return -1
         }
         lastTapAt = System.currentTimeMillis()
+        if (cluster != null) {
+            // 0.22：记下这次扎堆点击的目标 + 点之前那盘的签名，供下轮防重复点
+            lastTapRuleId = r.id; lastTapPoint = Point(p.x, p.y)
+            lastTapBoardSig = pendingBoardSig; repeatSkips = 0
+        } else {
+            lastTapRuleId = null; lastTapPoint = null; lastTapBoardSig = ""
+        }
         BoardMemory.noteTap(cluster ?: 1)
         val wait = (r.delayMs * Random.nextDouble(0.8, 1.2)).toLong()
         val n = clicks + 1
@@ -311,9 +346,11 @@ object Runner {
         // 签名里去掉贴着阈值的临界识别（0.19 实测：蛇 0.71~0.73 对 0.7 阈值，一轮有一轮没，
         // 签名每轮都变、无效果停永远触发不了，才会在结算画面上空点 7 轮）。临界只影响签名，不影响选目标。
         val sigComps = all.filter { it.comp.score >= it.rule.threshold + 0.05 }
+        var roundSig = ""
         if (sigComps.isNotEmpty()) {
             val sig = sigComps.sortedWith(compareBy({ it.rule.name }, { it.comp.point.y }, { it.comp.point.x }))
                 .joinToString(";") { "${it.rule.name}${it.comp.size}@${it.comp.point.x},${it.comp.point.y}" }
+            roundSig = sig
             if (sig == lastSig) sameRounds++ else sameRounds = 0
             lastSig = sig
             if (sameRounds >= 2) {
@@ -338,6 +375,19 @@ object Runner {
         }
         val wallCnt = (pick.comp.ys.ifEmpty { listOf(pick.comp.point.y) }).count { rowOf(it) <= 0 }
         val t3 = System.nanoTime()
+        // 0.22 防重复点：棋盘和上次点之前一字不差、选中的又是同一目标 = 读到的是点之前的旧帧。
+        // 跳过这一轮不点，等新画面；连跳 3 轮还不变，说明那次点可能真没打中，放行重打。
+        if (roundSig.isNotEmpty() && pick.rule.id == lastTapRuleId && pick.comp.point == lastTapPoint && roundSig == lastTapBoardSig) {
+            repeatSkips++
+            if (repeatSkips < 3) {
+                AppLog.d("匹配", "棋盘没变（与上次点 (${lastTapPoint!!.x},${lastTapPoint!!.y}) 时同一盘），跳过重复点，等新画面（第 $repeatSkips 次）")
+                return null
+            }
+            AppLog.w("匹配", "同一目标连跳 $repeatSkips 轮仍没变，放行重打 (${pick.comp.point.x},${pick.comp.point.y})")
+            repeatSkips = 0
+        } else {
+            repeatSkips = 0
+        }
         AppLog.d("匹配", "$summary → 点「${pick.rule.name}」（连成 ${pick.comp.size} 只，其中贴墙 $wallCnt 只，y${pick.comp.point.y}，相似度 ${"%.3f".format(pick.comp.score)}，${hzText(pickEv.hz)}）候选前三：$top3")
         AppLog.d("性能", "本轮识别 ${(t3 - t0) / 1_000_000}ms（截图转换 ${(t1 - t0) / 1_000_000} / 匹配 ${(t2 - t1) / 1_000_000} / 决策 ${(t3 - t2) / 1_000_000}）")
         if (bySize.cand.comp !== pick.comp && bySize.cand.comp.size > pick.comp.size) {
@@ -346,6 +396,7 @@ object Runner {
         }
         val near = scans.flatMap { s -> s.near.map { s.rule.name to it } }
         BoardMemory.onRound(compsAll, pick.comp, pick.rule.name, frame, near)?.let { AppLog.d("记忆", it) }
+        pendingBoardSig = roundSig
         return ClusterPick(pick.rule, pick.comp.point, pick.comp.score, pick.comp.size)
     }
 
