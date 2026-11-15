@@ -528,13 +528,16 @@ object Runner {
                 if (unknownTap == null) {
                     if (verdict.pick in cands.indices) {
                         val aiEv = ranked[verdict.pick]
-                        if (aiEv.cand.comp !== pickEv.cand.comp) {
+                        // 0.28 兜底：第 11 局模型选了"点完即越线"，那局随即结束。AI 选越线、期限规则有不越线的，改回期限规则。
+                        if (aiEv.hz < 0 && pickEv.hz >= 0) {
+                            AppLog.w("AI判点", "AI 选了点完即越线（${aiEv.cand.rule.name.removePrefix("守卫-")} ${aiEv.cand.comp.size}只），改回期限规则「${pickEv.cand.rule.name.removePrefix("守卫-")}」${pickEv.cand.comp.size}只（${hzText(pickEv.hz)}）")
+                        } else if (aiEv.cand.comp !== pickEv.cand.comp) {
                             aiChanged = true
                             AppLog.i("AI判点", "选第 ${verdict.pick} 伙「${aiEv.cand.rule.name.removePrefix("守卫-")}」${aiEv.cand.comp.size}只（第${BoardMemory.minRowOf(aiEv.cand.comp)}排，${hzText(aiEv.hz)}），期限规则本来选「${pickEv.cand.rule.name.removePrefix("守卫-")}」${pickEv.cand.comp.size}只")
+                            pickEv = aiEv
                         } else {
                             AppLog.d("AI判点", "和期限规则一致，点「${pickEv.cand.rule.name}」${pickEv.cand.comp.size}只")
                         }
-                        pickEv = aiEv
                     } else if (verdict.pick == -1) {
                         AppLog.d("AI判点", "模型说没有能点的，退回期限规则")
                     }

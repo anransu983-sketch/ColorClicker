@@ -12,8 +12,13 @@ import kotlinx.coroutines.withContext
 import org.json.JSONArray
 import org.json.JSONObject
 import java.io.ByteArrayOutputStream
+import java.io.File
+import java.io.FileOutputStream
 import java.net.HttpURLConnection
 import java.net.URL
+import java.text.SimpleDateFormat
+import java.util.Date
+import java.util.Locale
 
 /**
  * 0.26 AI 判点（Gemini 免费版）：
@@ -26,6 +31,10 @@ import java.net.URL
  * 够打十几局）；gemini-3.8-flash 更强但每天只有 20 次（约一局），在主界面模型名里改。
  * 教训：gemini-2.5-flash 已对新用户下线（2026-11-15 第 10 局实测全轮 404），所以模型名做成
  * 可配的，下次 Google 再换名不用重新发版。
+ * 0.28（第 11 局教训）：①模型把已知的蛇/树怪又报成未知怪，prompt 写明已知只有 6 种，
+ * 只有长得完全不一样的才算未知；②模型有一次选了"点完即越线"的候选（那局随即结束），
+ * prompt 加硬规则 + Runner 里加兜底（AI 选越线、期限规则有不越线的就改回期限规则）；
+ * ③模型报未知怪时把带列号/行号的棋盘图存成 ai_unknown_时间.jpg，事后能按格子裁模板。
  */
 object AiJudge {
     private const val PREFS = "ai_judge"
@@ -125,10 +134,25 @@ object AiJudge {
             这是手机游戏《放置军团》守卫城邦的棋盘。6列（列号0-5写在图顶）×7排（排号0-6写在图左），怪每被点一次全体上移一排，怪占领城墙（排-1再上移一格）战斗结束。点一只怪会同时消掉上下左右连着的同种怪。
             候选（已由程序按只数和危险度排好序，只从里面选）：
             $list
-            规则：优先保住城墙（第0/-1排的怪最急），再比只数多。只回 JSON，不要别的字：
+            已知怪只有 6 种：土豆怪、史莱姆、蝎子、树怪、蛇、花仙——候选里没列出的怪才算未知。
+            规则：1）绝不能选点完它会越线（余量写着"点完即越线"）的候选，除非所有候选都写着点完即越线；2）先比余量大，再比只数多；3）余量和只数都一样时选位置靠上的。只回 JSON，不要别的字：
             {"pick": <候选编号，0起；没有能点的回 -1>, "unknown": {"col": <列号0-5>, "row": <排号0-6>, "desc": "<看到的不在候选里的怪的样子，如淡蓝水母一只大紫眼睛>"} 或 "unknown": null}
-            只有当你确实在图上看到一种候选里没有的怪才填 unknown；不确定就填 null。
+            只有当你确实在图上看到一种和上面 6 种长得完全不一样的怪才填 unknown；只是候选里已有的怪换个说法不算未知，不确定就填 null。
         """.trimIndent()
+    }
+
+    /** 模型报未知怪时，把带列号/行号的棋盘图存一份，事后能按格子裁模板。 */
+    private fun saveUnknownShot(ctx: Context, frame: Bitmap, unknown: Unknown) {
+        try {
+            val ts = SimpleDateFormat("yyyyMMdd-HHmmss", Locale.getDefault()).format(Date())
+            val file = File(ctx.getExternalFilesDir(null), "ai_unknown_$ts.jpg")
+            val img = labeledBoard(frame)
+            FileOutputStream(file).use { img.compress(Bitmap.CompressFormat.JPEG, 85, it) }
+            if (!img.isRecycled) img.recycle()
+            AppLog.i("AI判点", "未知怪截图已存：${file.name}（${unknown.desc}，第 ${unknown.col} 列第 ${unknown.row} 排）")
+        } catch (e: Exception) {
+            AppLog.w("AI判点", "未知怪截图保存失败：${e.message?.take(80)}")
+        }
     }
 
     /** 发一轮判点。成功返回 Verdict；任何失败返回 null（调用方退回期限规则）。 */
@@ -190,6 +214,7 @@ object AiJudge {
                 val unknown = if (v.isNull("unknown")) null else v.optJSONObject("unknown")?.let {
                     Unknown(it.optInt("col", -1), it.optInt("row", -1), it.optString("desc", ""))
                 }?.takeIf { it.col in 0..5 && it.row in 0..6 }
+                if (unknown != null) saveUnknownShot(ctx, frame, unknown)
                 if (pick != -1 && pick !in cands.indices && unknown == null) {
                     AppLog.w("AI判点", "模型回的 pick=$pick 不在候选里，退回期限规则")
                     return@withContext null
