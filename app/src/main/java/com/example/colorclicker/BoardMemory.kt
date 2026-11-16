@@ -7,6 +7,7 @@ import java.io.File
 import java.io.FileOutputStream
 import kotlin.math.abs
 import kotlin.math.roundToInt
+import kotlin.math.sqrt
 
 /** 记忆学习 v2（0.19）。
  *  1. 期限判断（新）：horizonAfterKill() 给 Runner 用。每施法一次全体上移一格，贴墙怪（第 0 排）再上移一格到 y1271（第 -1 排）仍可点，
@@ -14,6 +15,8 @@ import kotlin.math.roundToInt
  *  2. 棋盘预测校验 + 缺口诊断（扩）：预测对不上的格子逐个列出（“预测有而实测无”），近阈值漏数嫌疑，必要时存诊断截图。
  *  3. 相似度记忆：每种怪相似度均值/最低，跨局存盘。
  *  4. 影子前瞻（改）：只在“同样安全”的候选里比两步值；分歧时记 差值，跨局累计，供判断要不要转正。
+ *  5. 贴墙漏数日志（0.38，只记不改决策）：用「颜色辅助」的格子底色，量第 -1/0/1 排里“有怪底色却没检出”的格数，
+ *     以及第 -2 排（已越过城墙线）出现的怪底色。见 auditWall / auditZeroFrame。
  *  数据存在 filesDir/guard_memory.json。 */
 object BoardMemory {
     private const val COL0_X = 117
@@ -93,6 +96,31 @@ object BoardMemory {
     private val typeStats = HashMap<String, TypeStat>()
     private var loaded = false
 
+    // ───────────── 0.38 贴墙漏数日志（只记不改决策）─────────────
+    // 空地 = 沙漠底（229,172,105），不是“素色深色”；有怪的格子才按类型染底色。结算屏把整盘压暗，但色度（各通道占三通道和的比例）不变，
+    // 所以一律用色度比，不用亮度：空地色度 ≈ (0.452,0.340,0.208)。
+    private const val CORNER = 95            // 取样角离格中心的偏移（格半宽 120；取 95 避开怪的身体）
+    private const val CORNER_WALL_Y = 85     // 第 -2 排只取下面两个角：y=1031+85=1116，仍在 BoardView/整帧内，且在城墙砖带之下
+    private const val PATCH = 3              // 取样块半边长：7×7 像素取每通道中位数
+    private const val NOT_SAND = 0.07        // 色度欧氏距离 > 0.07 = 底色不像空地（实测：怪底色离空地 ≥0.10，空地之间 <0.01）
+    private const val SAME_CHROMA = 0.06     // 同一格的几个角色度距离 < 0.06 才算同一种底色
+    private const val SAME_CHROMA_WALL = 0.12 // 第 -2 排两个下角的一致性放宽（砖墙底，且结算屏边缘有渐变）
+    private const val SAT_MIN = 0.40         // 第 -2 排：饱和度 (max-min)/max ≥ 0.40 才算怪底色（砖墙是灰蓝，约 0.2）
+    private const val REF_LEARN_TOL = 0.03   // 全零轮学空地色：角的色度离默认值 ≤0.03 的占 80% 以上才采信
+    private val DEF_REF = doubleArrayOf(229.0 / 506, 172.0 / 506, 105.0 / 506)
+    private var refChroma = DEF_REF
+    private var refFromZero = false
+    private var refLogged = false
+    private var assistOffLogged = false
+    private var assistOffBattle = false
+    private var wallMiss = 0          // 本局：贴墙(-1~1排)漏数 格·轮（同一只没认出的怪连续几轮都算）
+    private var wallMissNew = 0       // 本局：其中“新出现”的格数（上一轮上移一格的位置不在漏数里）≈ 漏掉的怪数
+    private var outMiss = 0           // 本局：第 -2 排出现怪底色的格数
+    private var prevMiss: Set<Pair<Int, Int>> = emptySet()
+    private var cumWallMiss = 0
+    private var cumWallMissNew = 0
+    private var cumOutMiss = 0
+
     fun beginBattle(ctx: Context) {
         appCtx = ctx.applicationContext
         load(ctx)
@@ -100,6 +128,8 @@ object BoardMemory {
         vanished = 0; suspect = 0; overrides = 0; verified = 0; topHit = 0; topTotal = 0; lastPicked = emptyList(); shots = 0
         shadowAgree = 0; shadowDiffer = 0; shadowGain = 0.0
         casts = 0; loggedKills = 0; roundNo = 0; dumps = 0
+        wallMiss = 0; wallMissNew = 0; outMiss = 0; prevMiss = emptySet()
+        refLogged = false; assistOffLogged = false; assistOffBattle = false
     }
 
     fun noteTap(kills: Int) { casts++; loggedKills += kills }
@@ -117,6 +147,11 @@ object BoardMemory {
         roundNo++
         val actual = comps.flatMap { (name, c) ->
             c.cells.ifEmpty { listOf(c.point) }.map { Cell(name, colOf(it.x), rowOfY(it.y)) }
+        }
+        // 0. 0.38 贴墙漏数日志：只读这一帧已抓到的像素，不改任何决策
+        if (frame != null) {
+            val nearCells = near.map { (_, n) -> Pair(colOf(n.x), rowOfY(n.y)) }.toSet()
+            auditWall(frame, actual.map { Pair(it.col, it.row) }.toSet(), nearCells)
         }
         var gone: List<Cell> = emptyList()
         // 1. 校验上一轮的预测
@@ -236,6 +271,138 @@ object BoardMemory {
         return groups
     }
 
+    // ───────────── 0.38 贴墙漏数：取样与判定 ─────────────
+    private class Px(val r: Int, val g: Int, val b: Int) {
+        val sat: Double get() { val mx = maxOf(r, g, b); return if (mx == 0) 0.0 else (mx - minOf(r, g, b)).toDouble() / mx }
+        val bright: Int get() = maxOf(r, g, b)
+        fun chroma(): DoubleArray { val t = (r + g + b).coerceAtLeast(1).toDouble(); return doubleArrayOf(r / t, g / t, b / t) }
+    }
+
+    private fun cdist(a: DoubleArray, b: DoubleArray): Double {
+        val d0 = a[0] - b[0]; val d1 = a[1] - b[1]; val d2 = a[2] - b[2]
+        return sqrt(d0 * d0 + d1 * d1 + d2 * d2)
+    }
+
+    private fun med(v: IntArray): Int { v.sort(); return v[v.size / 2] }
+
+    /** 以 (x,y) 为中心的 7×7 块，每通道取中位数；出界返回 null。一次 getPixels，不转 Mat、不多截帧。 */
+    private fun patch(f: Bitmap, x: Int, y: Int): Px? {
+        val n = 2 * PATCH + 1
+        if (x - PATCH < 0 || y - PATCH < 0 || x + PATCH >= f.width || y + PATCH >= f.height) return null
+        val buf = IntArray(n * n)
+        f.getPixels(buf, 0, n, x - PATCH, y - PATCH, n, n)
+        return Px(
+            med(IntArray(buf.size) { (buf[it] shr 16) and 255 }),
+            med(IntArray(buf.size) { (buf[it] shr 8) and 255 }),
+            med(IntArray(buf.size) { buf[it] and 255 })
+        )
+    }
+
+    /** 第 col 列第 row 排这一格“底色有染”吗（= 有怪）。四个角里 ≥3 个非空地色、且彼此色度一致才算；取不全返回 null。 */
+    private fun monsterBg(f: Bitmap, col: Int, row: Int): Boolean? {
+        val cx = COL0_X + col * STEP
+        val cy = ROW0_Y + row * STEP
+        val ps = listOf(-CORNER to -CORNER, CORNER to -CORNER, -CORNER to CORNER, CORNER to CORNER)
+            .mapNotNull { (dx, dy) -> patch(f, cx + dx, cy + dy) }
+        if (ps.size < 3) return null
+        val ch = ps.map { it.chroma() }
+        val non = ps.indices.filter { cdist(ch[it], refChroma) > NOT_SAND }
+        if (non.size < 3) return false
+        return non.count { i -> non.all { j -> cdist(ch[i], ch[j]) < SAME_CHROMA } } >= 3
+    }
+
+    /** 第 -2 排（越过城墙线）：背景是灰蓝砖墙，不能和空地色比，改看饱和度。只取下面两个角，两个都要饱和且色度相近。 */
+    private fun beyondWallBg(f: Bitmap, col: Int): Boolean {
+        val cx = COL0_X + col * STEP
+        val cy = ROW0_Y - 2 * STEP + CORNER_WALL_Y
+        val a = patch(f, cx - CORNER, cy) ?: return false
+        val b = patch(f, cx + CORNER, cy) ?: return false
+        if (a.sat < SAT_MIN || b.sat < SAT_MIN || a.bright < 20 || b.bright < 20) return false
+        return cdist(a.chroma(), b.chroma()) < SAME_CHROMA_WALL
+    }
+
+    private fun colTxt(cols: List<Int>) = cols.joinToString("、") { "第 ${it + 1} 列" }
+
+    /** 每轮一次：数第 -1/0/1 排里“底色有怪、模板却没检出”的格子（共 18 格），再看第 -2 排有没有怪底色。列号 1~6 从左到右，排号同棋盘。 */
+    private fun auditWall(frame: Bitmap, detected: Set<Pair<Int, Int>>, nearCells: Set<Pair<Int, Int>>) {
+        try {
+            if (frame.isRecycled) return
+            if (!refLogged) {
+                refLogged = true
+                AppLog.i("记忆", "贴墙漏数：空地参考色度 ${"%.3f".format(refChroma[0])}/${"%.3f".format(refChroma[1])}/${"%.3f".format(refChroma[2])}" +
+                    "（来源：${if (refFromZero) "全零轮学到" else "固定默认值，本局还没有全零轮可学"}；有怪判据＝色度距离>0.07）；列号 1~6 从左到右，排 0=贴墙排，-1=墙后一格")
+            }
+            // 颜色辅助开了没：抽至多 8 个已检出的格子，看底色是不是“非空地”。检出的格子底色几乎都像空地 = 没开，整轮跳过，不把素色盘当漏数。
+            var sampled = 0; var tinted = 0
+            for ((c, r) in detected.take(8)) {
+                val t = monsterBg(frame, c, r) ?: continue
+                sampled++; if (t) tinted++
+            }
+            if (sampled >= 2 && tinted * 4 < sampled) {
+                assistOffBattle = true
+                if (!assistOffLogged) {
+                    assistOffLogged = true
+                    AppLog.w("记忆", "颜色辅助未开（抽查 $sampled 个检出的格子，只有 $tinted 个底色有染），贴墙漏数检测跳过")
+                }
+                return
+            }
+            val miss = ArrayList<Pair<Int, Int>>()
+            for (r in -1..1) for (c in 0..5) {
+                if (Pair(c, r) in detected) continue
+                if (monsterBg(frame, c, r) == true) miss.add(Pair(c, r))
+            }
+            // 新出现：上一轮同一只若在下一排（施法后上移一格），位置是 (c, r+1)，已在上一轮漏数里就不再算新的
+            val newCnt = miss.count { (c, r) -> Pair(c, r + 1) !in prevMiss }
+            prevMiss = miss.toSet()
+            wallMiss += miss.size; wallMissNew += newCnt
+            if (miss.isEmpty()) {
+                AppLog.d("记忆", "贴墙漏数：0 格")
+            } else {
+                AppLog.w("记忆", "贴墙漏数：${miss.size} 格（" + miss.joinToString("、") {
+                    "第 ${it.first + 1} 列第 ${it.second} 排" + if (it in nearCells) "·近阈值" else ""
+                } + "），其中新出现 $newCnt 格；这些格底色有怪，模板没检出")
+            }
+            val out = (0..5).filter { beyondWallBg(frame, it) }
+            if (out.isNotEmpty()) {
+                outMiss += out.size
+                AppLog.w("记忆", "贴墙外漏数：第 -2 排有 ${out.size} 格怪底色（${colTxt(out)}）——怪已越过城墙线；识别窗口 y≥1100 看不到第 -2 排，候选里不会有它们")
+            }
+        } catch (e: Exception) {
+            AppLog.w("记忆", "贴墙漏数检测出错，本轮跳过：${e.javaClass.simpleName}")
+        }
+    }
+
+    /** Runner 在“点过之后第一次整盘全零”时调用（每局最多 3 次）：① 学空地参考色（角的色度大多贴近默认值才采信，压暗的结算屏也适用）；
+     *  ② 看第 -2 排有没有怪底色。整盘全零的帧可能是结算屏（压暗、模板全认不出），所以这里不数第 -1~1 排，免得把压暗误报成漏数。 */
+    fun auditZeroFrame(frame: Bitmap?) {
+        if (frame == null || frame.isRecycled) return
+        try {
+            val chs = ArrayList<DoubleArray>()
+            var total = 0
+            for (r in -1..6) for (c in 0..5) {
+                val cx = COL0_X + c * STEP; val cy = ROW0_Y + r * STEP
+                for ((dx, dy) in listOf(-CORNER to -CORNER, CORNER to -CORNER, -CORNER to CORNER, CORNER to CORNER)) {
+                    val px = patch(frame, cx + dx, cy + dy) ?: continue
+                    total++
+                    val ch = px.chroma()
+                    if (cdist(ch, DEF_REF) <= REF_LEARN_TOL) chs.add(ch)
+                }
+            }
+            if (total >= 100 && chs.size * 10 >= total * 8) {
+                val m = DoubleArray(3) { k -> chs.map { it[k] }.sorted()[chs.size / 2] }
+                refChroma = m; refFromZero = true
+                AppLog.i("记忆", "贴墙漏数：全零轮学到空地参考色度 ${"%.3f".format(m[0])}/${"%.3f".format(m[1])}/${"%.3f".format(m[2])}（${chs.size}/$total 个角贴近默认值）")
+            }
+            val out = (0..5).filter { beyondWallBg(frame, it) }
+            if (out.isNotEmpty()) {
+                outMiss += out.size
+                AppLog.w("记忆", "贴墙外漏数（整盘全零帧）：第 -2 排有 ${out.size} 格怪底色（${colTxt(out)}）——怪已越过城墙线")
+            }
+        } catch (e: Exception) {
+            AppLog.w("记忆", "贴墙外检测出错：${e.javaClass.simpleName}")
+        }
+    }
+
     private fun dump(frame: Bitmap?, why: String) {
         val ctx = appCtx ?: return
         if (frame == null || dumps >= MAX_DUMPS) return
@@ -276,17 +443,20 @@ object BoardMemory {
         cumVerified += verified; cumTopHit += topHit; cumTopTotal += topTotal
         cumOverrides += overrides; cumDivN += shadowDiffer; cumDivGain += shadowGain
         cumCasts += casts; cumKills += loggedKills
+        cumWallMiss += wallMiss; cumWallMissNew += wallMissNew; cumOutMiss += outMiss
         save(ctx)
         val pred = if (predTotal > 0) "$predHit/$predTotal" else "—"
         AppLog.i("记忆", "本局记忆：施法 $casts 次，记消 $loggedKills 只（${"%.2f".format(if (casts > 0) loggedKills.toDouble() / casts else 0.0)} 只/次）；" +
-            "预测命中 $pred 格，新刷 $predNew 只；预测有而实测无 $vanished 格；近阈值漏数嫌疑 $suspect 格；期限优先改点 $overrides 次；" +
+            "预测命中 $pred 格，新刷 $predNew 只；预测有而实测无 $vanished 格；近阈值漏数嫌疑 $suspect 格；" +
+            wallMissText() + "期限优先改点 $overrides 次；" +
             "影子前瞻一致 $shadowAgree 次、不同 $shadowDiffer 次" + if (shadowDiffer > 0) "（平均差 +${"%.2f".format(shadowGain / shadowDiffer)}）" else "")
         AppLog.i("记忆", "核实对账：记消 $loggedKills 只；点后核实清掉 $verified 只（逐施法对照前后棋盘，不依赖结算；两者差 ${verified - loggedKills}）；" +
-            "上部(排≤4)预测命中 ${if (topTotal > 0) "$topHit/$topTotal" else "—"}；漏数嫌疑 $suspect 格")
+            "上部(排≤4)预测命中 ${if (topTotal > 0) "$topHit/$topTotal" else "—"}；漏数嫌疑 $suspect 格；" + wallMissText().trimEnd('；'))
         val rate = if (cumPredTotal > 0) "%.1f%%".format(100.0 * cumPredHit / cumPredTotal) else "—"
         AppLog.i("记忆", "累计 $battles 局：预测命中率 $rate（上部 ${if (cumTopTotal > 0) "%.1f%%".format(100.0 * cumTopHit / cumTopTotal) else "—"}），前瞻分歧 $cumDivN 次" +
             (if (cumDivN > 0) "（平均差 +${"%.2f".format(cumDivGain / cumDivN)}）" else "") +
             "，期限优先改点 $cumOverrides 次，累计施法 $cumCasts 次 / 记消 $cumKills 只")
+        AppLog.i("记忆", "贴墙漏数累计：$cumWallMiss 格·轮（约 $cumWallMissNew 只），贴墙外 $cumOutMiss 格（含本局）")
         val sim = typeStats.entries.sortedBy { it.key }
             .joinToString(" ") { "${it.key.removePrefix("守卫-")}均${"%.2f".format(it.value.avg)}最低${"%.2f".format(it.value.min)}" }
         AppLog.i("记忆", "相似度累计：$sim")
@@ -295,6 +465,11 @@ object BoardMemory {
         }
         predicted = emptyList()
     }
+
+    /** 本局贴墙漏数的一小段文字，供「本局记忆 / 核实对账」两行并排放在漏数嫌疑旁边 */
+    private fun wallMissText(): String =
+        if (assistOffBattle) "贴墙漏数 —（本局颜色辅助未开，未检测）；"
+        else "贴墙漏数 $wallMiss 格·轮（约 $wallMissNew 只）；贴墙外漏数 $outMiss 格；"
 
     /** 给界面看的累计摘要（主界面「查看记忆学习」用）；没打过任何一局返回 null。 */
     fun summaryText(ctx: Context): String? {
@@ -306,6 +481,7 @@ object BoardMemory {
         sb.append("累计 $battles 局，施法 $cumCasts 次，记消 $cumKills 只\n")
         sb.append("棋盘预测命中 $cumPredHit/$cumPredTotal（$rate），上部（排≤4）$cumTopHit/$cumTopTotal（$topRate）\n")
         sb.append("点后核实清掉 $cumVerified 只，预测有而实测无 $cumVanished 格，漏数嫌疑 $cumSuspect 格\n")
+        sb.append("贴墙漏数 $cumWallMiss 格·轮（约 $cumWallMissNew 只），贴墙外 $cumOutMiss 格\n")
         sb.append("期限优先改点 $cumOverrides 次；影子前瞻分歧 $cumDivN 次")
         if (cumDivN > 0) sb.append("（平均差 +${"%.2f".format(cumDivGain / cumDivN)}）")
         sb.append("，仍在影子模式，没改决策\n")
@@ -331,6 +507,7 @@ object BoardMemory {
             cumOverrides = j.optInt("cumOverrides"); cumDivN = j.optInt("cumDivN")
             cumDivGain = j.optDouble("cumDivGain", 0.0)
             cumCasts = j.optInt("cumCasts"); cumKills = j.optInt("cumKills")
+            cumWallMiss = j.optInt("cumWallMiss"); cumWallMissNew = j.optInt("cumWallMissNew"); cumOutMiss = j.optInt("cumOutMiss")
             val types = j.optJSONObject("types") ?: return
             for (k in types.keys()) {
                 val o = types.getJSONObject(k)
@@ -356,6 +533,7 @@ object BoardMemory {
                 put("cumVerified", cumVerified); put("cumTopHit", cumTopHit); put("cumTopTotal", cumTopTotal)
                 put("cumOverrides", cumOverrides); put("cumDivN", cumDivN); put("cumDivGain", cumDivGain)
                 put("cumCasts", cumCasts); put("cumKills", cumKills)
+                put("cumWallMiss", cumWallMiss); put("cumWallMissNew", cumWallMissNew); put("cumOutMiss", cumOutMiss)
             }.toString())
         } catch (e: Exception) {
             AppLog.e("记忆", "记忆文件写失败", e)

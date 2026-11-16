@@ -469,6 +469,7 @@ object Runner {
             if (!zeroShotDone && lastTapAt > 0 && zeroShots < 3) {
                 zeroShotDone = true; zeroShots++
                 BoardMemory.saveBitmap(frame, "zero$zeroShots")
+                BoardMemory.auditZeroFrame(frame)   // 0.38：学空地参考色 + 看第 -2 排有没有越线怪底色（只记不改决策）
             }
             return null
         }
