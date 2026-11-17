@@ -138,11 +138,16 @@ class MainActivity : ComponentActivity() {
                                 Triple("builtin_snake", "守卫-蛇", "tpl_snake.png"),
                                 Triple("builtin_fairy", "守卫-花仙", "tpl_fairy.png"),
                                 Triple("builtin_jellyfish", "守卫-水母", "tpl_jellyfish.png"),
+                                // 0.42 预备：野猪（红皮野猪怪，蓝鬃毛，红底色）——31 局后她手动那局里拍到 3 只排底排，
+                                // 模板 tpl_boar.png 待她发 02:19:40 那张的原图（1440×3120）后裁入，齐了再编 0.42 推
+                                Triple("builtin_boar", "守卫-野猪", "tpl_boar.png"),
                             )
                             // 土豆 0.75：0.13/0.15 局里曾掉到 0.848，离 0.8 太近；树/蛇/花仙模板从
                             // 战斗结束暗屏裁出，颜色偏暗，阈值放宽到 0.7；史莱姆/蝎子一直 0.98+，保持 0.8
                             // 水母 0.75：模板是 0.29 AI 自动裁的亮屏原图（第 12 局 22:21:39 那只），先按土豆档起步
-                            val thresholds = mapOf("builtin_potato" to 0.75, "builtin_tree" to 0.7, "builtin_snake" to 0.7, "builtin_fairy" to 0.7, "builtin_jellyfish" to 0.75)
+                            // 野猪 0.8：原生图 NCC——三只野猪互认 0.994–1.000（同一精灵），但同排土豆/蝎子 0.706–0.707
+                            // 偏高（底排共有的暗红底色）；0.8 既够得着真野猪（0.99），又压住误认。effThr 另有野猪 0.8 的 cap
+                            val thresholds = mapOf("builtin_potato" to 0.75, "builtin_tree" to 0.7, "builtin_snake" to 0.7, "builtin_fairy" to 0.7, "builtin_jellyfish" to 0.75, "builtin_boar" to 0.8)
                             var added = 0
                             var updated = 0
                             for ((id, name, asset) in builtins) {
