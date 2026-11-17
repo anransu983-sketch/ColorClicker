@@ -66,6 +66,10 @@ object Runner {
     private const val ROW0_Y = 1511
     private const val ROW_STEP = 240
     private fun rowOf(y: Int) = Math.round((y - ROW0_Y).toDouble() / ROW_STEP).toInt()   // 可为 -1
+    private fun colOf(x: Int) = ((x - 117 + 120) / 240).coerceIn(0, 5)   // 0.39：和 BoardMemory.colOf 一个算法（第一列中心 117，格宽 240）
+
+    /** 0.39 贴墙漏数代点用的假规则：不是模板识别出来的怪，只是个落点。delayMs 跟扎堆规则一样 600ms；threshold 0 只是让日志照实写“相似度 0.000”（本来就没模板分）。 */
+    private val WALL_FALLBACK_RULE = Rule(id = "wall_fallback", name = "贴墙漏数", type = "image", threshold = 0.0, delayMs = 600, clusterFirst = true)
 
     /** 点击没效果的检测：连续几轮棋盘签名一字不差就停 */
     private var lastSig = ""
@@ -561,6 +565,25 @@ object Runner {
             val cell = unknownTap!!
             pickEv = Ev(Cand(pickEv.cand.rule, Matcher.Comp(cell, 1, 0.0, ys = listOf(cell.y), cells = listOf(cell))), pickEv.hz)
         }
+        // 0.39 贴墙漏数代点：上一轮漏数的第 0 排怪现在已到 -1 排，下一施法就撞墙；
+        // 模板认不出它、底色却有怪，坐标是清楚的。期限规则点的不是 -1 排时改点它——
+        // 不点它就等撞墙。AI 未知怪已接管时不叠加。
+        var wallFallback: Point? = null
+        var wallFallbackCol = -1
+        var origPickDesc = ""
+        if (unknownTap == null) {
+            val detectedCells = all.flatMap { it.comp.cells.ifEmpty { listOf(it.comp.point) } }
+                .map { Pair(colOf(it.x), rowOf(it.y)) }.toSet()
+            val fb = BoardMemory.wallMissFallback(detectedCells)
+            if (fb.isNotEmpty() && BoardMemory.minRowOf(pickEv.cand.comp) > -1) {
+                origPickDesc = "${pickEv.cand.rule.name.removePrefix("守卫-")}${pickEv.cand.comp.size}只（第${BoardMemory.minRowOf(pickEv.cand.comp)}排，${hzText(pickEv.hz)}）"
+                val (fc, _) = fb.minByOrNull { it.first }!!
+                wallFallbackCol = fc
+                wallFallback = BoardMemory.cellCenter(fc, -1)
+                val cell = wallFallback!!
+                pickEv = Ev(Cand(WALL_FALLBACK_RULE, Matcher.Comp(cell, 1, 0.0, ys = listOf(cell.y), cells = listOf(cell))), pickEv.hz)
+            }
+        }
         val pick = pickEv.cand
         val bySize = evs.sortedWith(compareByDescending<Ev> { it.cand.comp.size }.thenBy { it.cand.comp.point.y }).first()
         val top3 = ranked.take(3).joinToString(" | ") {
@@ -581,13 +604,15 @@ object Runner {
         } else {
             repeatSkips = 0
         }
-        if (unknownTap != null) {
+        if (wallFallback != null) {
+            AppLog.w("匹配", "$summary → 贴墙漏数代点：第 ${wallFallbackCol + 1} 列第 -1 排（${wallFallback!!.x},${wallFallback!!.y}）（模板没认出、底色有怪，马上撞墙；期限规则本来点「$origPickDesc」）候选前三：$top3")
+        } else if (unknownTap != null) {
             AppLog.d("匹配", "$summary → AI判点：点未知怪「$unknownDesc」（第 $unknownCol 列第 $unknownRow 排，(${unknownTap!!.x},${unknownTap!!.y})）候选前三：$top3")
         } else {
             AppLog.d("匹配", "$summary → 点「${pick.rule.name}」（连成 ${pick.comp.size} 只，其中贴墙 $wallCnt 只，y${pick.comp.point.y}，相似度 ${"%.3f".format(pick.comp.score)}，${hzText(pickEv.hz)}）候选前三：$top3")
         }
         AppLog.d("性能", "本轮识别 ${(t3 - t0) / 1_000_000}ms（截图转换 ${(t1 - t0) / 1_000_000} / 匹配 ${(t2 - t1) / 1_000_000} / 决策 ${(t3 - t2) / 1_000_000}）")
-        if (unknownTap == null && !aiChanged && bySize.cand.comp !== pick.comp && bySize.cand.comp.size > pick.comp.size) {
+        if (unknownTap == null && wallFallback == null && !aiChanged && bySize.cand.comp !== pick.comp && bySize.cand.comp.size > pick.comp.size) {
             BoardMemory.noteOverride()
             AppLog.w("匹配", "期限优先：只数最大的「${bySize.cand.rule.name.removePrefix("守卫-")}」${bySize.cand.comp.size}只，点完它 ${hzText(bySize.hz)}；改点「${pick.rule.name.removePrefix("守卫-")}」${pick.comp.size}只（${hzText(pickEv.hz)}）")
         }

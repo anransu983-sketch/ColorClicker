@@ -2,6 +2,7 @@ package com.example.colorclicker
 
 import android.content.Context
 import android.graphics.Bitmap
+import android.graphics.Point
 import org.json.JSONObject
 import java.io.File
 import java.io.FileOutputStream
@@ -298,17 +299,21 @@ object BoardMemory {
         )
     }
 
-    /** 第 col 列第 row 排这一格“底色有染”吗（= 有怪）。四个角里 ≥3 个非空地色、且彼此色度一致才算；取不全返回 null。 */
+    /** 第 col 列第 row 排这一格“底色有染”吗（= 有怪）。四个角里 ≥3 个非空地色、且彼此色度一致才算；取不全返回 null。
+     *  0.39：-1 排上面两个角（y=1271-95=1176）在城墙砖带里（墙底 ~1200），读到砖墙不是格子底色，
+     *  四角互认会被顶掉——27 局撞墙的那个 -1 排怪就是这么漏的。-1 排只看下面两个角（和 -2 排一个路子）。 */
     private fun monsterBg(f: Bitmap, col: Int, row: Int): Boolean? {
         val cx = COL0_X + col * STEP
         val cy = ROW0_Y + row * STEP
-        val ps = listOf(-CORNER to -CORNER, CORNER to -CORNER, -CORNER to CORNER, CORNER to CORNER)
-            .mapNotNull { (dx, dy) -> patch(f, cx + dx, cy + dy) }
-        if (ps.size < 3) return null
+        val offs = if (row == -1) listOf(-CORNER to CORNER, CORNER to CORNER)
+            else listOf(-CORNER to -CORNER, CORNER to -CORNER, -CORNER to CORNER, CORNER to CORNER)
+        val ps = offs.mapNotNull { (dx, dy) -> patch(f, cx + dx, cy + dy) }
+        val need = if (row == -1) 2 else 3
+        if (ps.size < need) return null
         val ch = ps.map { it.chroma() }
         val non = ps.indices.filter { cdist(ch[it], refChroma) > NOT_SAND }
-        if (non.size < 3) return false
-        return non.count { i -> non.all { j -> cdist(ch[i], ch[j]) < SAME_CHROMA } } >= 3
+        if (non.size < need) return false
+        return non.count { i -> non.all { j -> cdist(ch[i], ch[j]) < SAME_CHROMA } } >= need
     }
 
     /** 第 -2 排（越过城墙线）：背景是灰蓝砖墙，不能和空地色比，改看饱和度。只取下面两个角，两个都要饱和且色度相近。 */
@@ -371,6 +376,17 @@ object BoardMemory {
             AppLog.w("记忆", "贴墙漏数检测出错，本轮跳过：${e.javaClass.simpleName}")
         }
     }
+
+    /** 格子中心（原生坐标）。BoardMemory 自己的几何：第一列中心 117、第一排中心 1511、格距 240。 */
+    fun cellCenter(col: Int, row: Int) = Point(COL0_X + col * STEP, ROW0_Y + row * STEP)
+
+    /** 0.39 贴墙漏数代点：上一轮漏数的第 0 排格子，这一轮已上移到 -1 排（再不点，下一施法就撞墙）。
+     *  传进本轮模板已检出的格子，去掉已检出的——剩下的就是“底色有怪、模板认不出、马上撞墙”的格子。
+     *  注意时序：Runner 在选点时调它，那时 prevMiss 还是上一轮的（本轮 auditWall 在 onRound 里才跑），
+     *  所以第 0 排漏数正好对应现在的 -1 排；上一轮的 -1 排漏数现在已到 -2 排，撞了，没得点。 */
+    fun wallMissFallback(detected: Set<Pair<Int, Int>>): List<Pair<Int, Int>> =
+        prevMiss.filter { it.second == 0 }.map { Pair(it.first, -1) }
+            .filter { it !in detected }
 
     /** Runner 在“点过之后第一次整盘全零”时调用（每局最多 3 次）：① 学空地参考色（角的色度大多贴近默认值才采信，压暗的结算屏也适用）；
      *  ② 看第 -2 排有没有怪底色。整盘全零的帧可能是结算屏（压暗、模板全认不出），所以这里不数第 -1~1 排，免得把压暗误报成漏数。 */
