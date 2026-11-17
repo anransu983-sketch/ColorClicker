@@ -33,7 +33,9 @@ object Runner {
         val cap = when {
             r.name.contains("蛇") -> 0.62
             r.name.contains("树") -> 0.64
-            r.name.contains("土豆") -> 0.72
+            // 0.41：土豆 0.72→0.68——30 局墙边诊断：0/1 排漏掉的土豆原生分 0.702–0.708（6 格三轮复现，第二名 ≤0.28），
+            // 就卡在阈值下面一点点；空板噪声底 ≤0.53，0.68 仍有余量。−1 排（0.336–0.591）是长相问题，降阈值救不了，不动它。
+            r.name.contains("土豆") -> 0.68
             else -> 0.76
         }
         return minOf(r.threshold, cap)
