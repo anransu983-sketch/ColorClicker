@@ -82,6 +82,42 @@ object Matcher {
         }
     }
 
+    /** 0.40 诊断：对 frame 里以 (cx,cy) 为中心的格子，逐规则在小窗内跑全分辨率 TM_CCOEFF_NORMED，返回每规则的最佳分。
+     *  只给贴墙漏数格做诊断用（每轮最多几格），不参与决策。已算好的匹配响应只保留 ≥阈值和近阈值点，
+     *  墙边怪若只有 0.3 分在里面根本留不下痕，所以这里对着同一帧、同一套模板重算一次小窗分——
+     *  口径和决策路一样（全分辨率 TM_CCOEFF_NORMED），数字可以直接和日志里的相似度比。 */
+    fun bestScoresAtCell(frame: Bitmap, tpls: List<Pair<String, Tpl>>, cx: Int, cy: Int): List<Pair<String, Double>> {
+        if (tpls.isEmpty() || frame.isRecycled) return emptyList()
+        val src = Mat()
+        val rgb = Mat()
+        try {
+            Utils.bitmapToMat(frame, src)
+            Imgproc.cvtColor(src, rgb, Imgproc.COLOR_RGBA2RGB)
+            val half = 170   // 半窗 170：模板约 200，窗内可平移 ±70 找最佳位置，够 cover 格子偏差
+            val x0 = (cx - half).coerceAtLeast(0); val y0 = (cy - half).coerceAtLeast(0)
+            val x1 = (cx + half).coerceAtMost(rgb.cols()); val y1 = (cy + half).coerceAtMost(rgb.rows())
+            if (x1 - x0 < 8 || y1 - y0 < 8) return emptyList()
+            val roi = Mat(rgb, Rect(x0, y0, x1 - x0, y1 - y0))
+            try {
+                val out = ArrayList<Pair<String, Double>>()
+                for ((name, tpl) in tpls) {
+                    val t = tpl.full
+                    if (t.cols() > roi.cols() || t.rows() > roi.rows()) { out.add(name to 0.0); continue }
+                    val res = Mat()
+                    Imgproc.matchTemplate(roi, t, res, Imgproc.TM_CCOEFF_NORMED)
+                    val mm = Core.minMaxLoc(res)
+                    res.release()
+                    out.add(name to mm.maxVal)
+                }
+                return out
+            } finally { roi.release() }
+        } catch (_: Exception) {
+            return emptyList()
+        } finally {
+            src.release(); rgb.release()
+        }
+    }
+
     /** 一伙连着的同类怪：point=这伙最上面那只的中心（点它清整伙，也离城墙最近），size=这伙只数，score=那只的相似度 */
     data class Comp(val point: Point, val size: Int, val score: Double, val ys: List<Int> = emptyList(), val cells: List<Point> = emptyList(), val scores: List<Double> = emptyList())   // ys = 这伙每只怪的中心 y；cells = 每只怪的中心点
 

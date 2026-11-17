@@ -143,7 +143,8 @@ object BoardMemory {
         pick: Matcher.Comp?,
         pickRule: String,
         frame: Bitmap? = null,
-        near: List<Pair<String, Matcher.Near>> = emptyList()
+        near: List<Pair<String, Matcher.Near>> = emptyList(),
+        tpls: List<Pair<String, Matcher.Tpl>> = emptyList()
     ): String? {
         roundNo++
         val actual = comps.flatMap { (name, c) ->
@@ -152,7 +153,7 @@ object BoardMemory {
         // 0. 0.38 贴墙漏数日志：只读这一帧已抓到的像素，不改任何决策
         if (frame != null) {
             val nearCells = near.map { (_, n) -> Pair(colOf(n.x), rowOfY(n.y)) }.toSet()
-            auditWall(frame, actual.map { Pair(it.col, it.row) }.toSet(), nearCells)
+            auditWall(frame, actual.map { Pair(it.col, it.row) }.toSet(), nearCells, tpls)
         }
         var gone: List<Cell> = emptyList()
         // 1. 校验上一轮的预测
@@ -329,7 +330,7 @@ object BoardMemory {
     private fun colTxt(cols: List<Int>) = cols.joinToString("、") { "第 ${it + 1} 列" }
 
     /** 每轮一次：数第 -1/0/1 排里“底色有怪、模板却没检出”的格子（共 18 格），再看第 -2 排有没有怪底色。列号 1~6 从左到右，排号同棋盘。 */
-    private fun auditWall(frame: Bitmap, detected: Set<Pair<Int, Int>>, nearCells: Set<Pair<Int, Int>>) {
+    private fun auditWall(frame: Bitmap, detected: Set<Pair<Int, Int>>, nearCells: Set<Pair<Int, Int>>, tpls: List<Pair<String, Matcher.Tpl>> = emptyList()) {
         try {
             if (frame.isRecycled) return
             if (!refLogged) {
@@ -363,9 +364,21 @@ object BoardMemory {
             if (miss.isEmpty()) {
                 AppLog.d("记忆", "贴墙漏数：0 格")
             } else {
+                // 0.40：每个漏数格逐规则算小窗最佳分（原生分辨率）。已算好的匹配响应只留 ≥阈值和近阈值点，
+                // 墙边怪若只有 0.3 分在里面根本留不下痕——重算一次才能看到它到底是 0.75 还是 0.3。
+                val diag = if (tpls.isNotEmpty()) {
+                    miss.take(6).associateWith { (c, r) ->
+                        val p = cellCenter(c, r)
+                        Matcher.bestScoresAtCell(frame, tpls, p.x, p.y)
+                            .sortedByDescending { it.second }.take(2)
+                    }
+                } else emptyMap()
+                val diagTxt = if (diag.isEmpty()) "" else "；逐格最佳分：" + diag.entries.joinToString("；") { (cell, top) ->
+                    "第 ${cell.first + 1} 列第 ${cell.second} 排→" + if (top.isEmpty()) "无响应" else top.joinToString("/") { "${it.first.removePrefix("守卫-")}${"%.3f".format(it.second)}" }
+                }
                 AppLog.w("记忆", "贴墙漏数：${miss.size} 格（" + miss.joinToString("、") {
                     "第 ${it.first + 1} 列第 ${it.second} 排" + if (it in nearCells) "·近阈值" else ""
-                } + "），其中新出现 $newCnt 格；这些格底色有怪，模板没检出")
+                } + "），其中新出现 $newCnt 格；这些格底色有怪，模板没检出$diagTxt")
             }
             val out = (0..5).filter { beyondWallBg(frame, it) }
             if (out.isNotEmpty()) {
@@ -474,7 +487,7 @@ object BoardMemory {
             "，期限优先改点 $cumOverrides 次，累计施法 $cumCasts 次 / 记消 $cumKills 只")
         AppLog.i("记忆", "贴墙漏数累计：$cumWallMiss 格·轮（约 $cumWallMissNew 只），贴墙外 $cumOutMiss 格（含本局）")
         val sim = typeStats.entries.sortedBy { it.key }
-            .joinToString(" ") { "${it.key.removePrefix("守卫-")}均${"%.2f".format(it.value.avg)}最低${"%.2f".format(it.value.min)}" }
+            .joinToString(" ") { "${it.key.removePrefix("守卫-")}出现${it.value.n}次均${"%.2f".format(it.value.avg)}最低${"%.2f".format(it.value.min)}" }
         AppLog.i("记忆", "相似度累计：$sim")
         for ((name, s) in typeStats) {
             if (s.min < 0.68) AppLog.w("记忆", "「${name.removePrefix("守卫-")}」相似度最低到 ${"%.3f".format(s.min)}（均值 ${"%.2f".format(s.avg)}），阈值可能要下调，下局留意")

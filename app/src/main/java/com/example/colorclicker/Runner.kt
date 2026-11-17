@@ -618,7 +618,8 @@ object Runner {
         }
         rememberRound(evs, pick, frame)
         val near = scans.flatMap { s -> s.near.map { s.rule.name to it } }
-        BoardMemory.onRound(compsAll, pick.comp, pick.rule.name, frame, near)?.let { AppLog.d("记忆", it) }
+        val diagTpls = clusterRules.mapIndexedNotNull { i, r -> tpls[i]?.let { r.name to it } }
+        BoardMemory.onRound(compsAll, pick.comp, pick.rule.name, frame, near, diagTpls)?.let { AppLog.d("记忆", it) }
         pendingBoardSig = roundSig
         val aiNote = if (unknownTap != null) "未知怪「$unknownDesc」（第 $unknownCol 列第 $unknownRow 排）" else null
         return ClusterPick(pick.rule, pick.comp.point, pick.comp.score, pick.comp.size, aiNote)

@@ -71,7 +71,8 @@ class MainActivity : ComponentActivity() {
         var showAdd by remember { mutableStateOf(false) }
         var showLog by remember { mutableStateOf(false) }
         var showMemory by remember { mutableStateOf(false) }
-        val memText = remember(showMemory) { if (showMemory) BoardMemory.summaryText(ctx) else null }
+        var memVersion by remember { mutableStateOf(0) }
+        val memText = remember(showMemory, memVersion) { if (showMemory) BoardMemory.summaryText(ctx) else null }
         var updateInfo by remember { mutableStateOf<Updater.UpdateInfo?>(null) }
         var updateProgress by remember { mutableStateOf(-1) }   // -1 未下载，0~100 下载中
         var updateError by remember { mutableStateOf("") }
@@ -103,7 +104,7 @@ class MainActivity : ComponentActivity() {
                         }) { Text("2. 授权悬浮窗") }
                         Button({ startProjection() }) { Text("3. 授权截屏并启动") }
                         OutlinedButton({ showLog = true }) { Text("查看详细日志") }
-                        OutlinedButton({ showMemory = true }) { Text("查看记忆学习") }
+                        OutlinedButton({ memVersion++; showMemory = true }) { Text("查看记忆学习") }
                         OutlinedButton({
                             updateChecked = true; updateError = ""
                             scope.launch(kotlinx.coroutines.Dispatchers.IO) {
