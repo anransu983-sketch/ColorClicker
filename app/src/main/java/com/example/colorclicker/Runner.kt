@@ -54,6 +54,11 @@ object Runner {
     private const val GATE_MAX_Y = 2800
     private val latticeBias = HashMap<String, ArrayList<Int>>()
     private var slideRetries = 0
+    /** 0.47 半截帧等待：点后第一帧伙已消、整盘还没上移（BoardMemory.unshiftedMatch）时稍等重截；最多等 12×100ms，再不上移就按当前帧处理 */
+    private const val STALE_RETRY_MS = 100L
+    private const val STALE_MAX_RETRY = 12
+    private var staleRetries = 0
+    @Volatile private var staleFlag = false
     @Volatile private var slidingFlag = false
 
     // ───────── 0.23 复盘（死前回放）─────────
@@ -211,7 +216,7 @@ object Runner {
             if (rules.isEmpty()) AppLog.w("服务", "没有启用的规则，不会执行任何点击")
             lastSig = ""; sameRounds = 0; noEffectStop = false; lastTapAt = 0L
             lastTapRuleId = null; lastTapPoint = null; lastTapBoardSig = ""; pendingBoardSig = ""; repeatSkips = 0; lastTapFrameSig = null
-            slideRetries = 0; slidingFlag = false; zeroShotDone = false; zeroShots = 0; clearReplay()
+            slideRetries = 0; slidingFlag = false; staleRetries = 0; staleFlag = false; zeroShotDone = false; zeroShots = 0; clearReplay()
             BoardMemory.beginBattle(ctx)
             var frameLogged = false
             var nullLogged = false
@@ -253,6 +258,7 @@ object Runner {
                     val best = matchClusterRound(ctx, frame, clusterRules)
                     if (noEffectStop) { stop(); return@launch }
                     if (slidingFlag) { slidingFlag = false; delay(SLIDE_RETRY_MS); continue }
+                    if (staleFlag) { staleFlag = false; delay(STALE_RETRY_MS); continue }
                     if (best != null) {
                         lastTapFrameSig = sig(frame)
                         val n = doTap(best.rule, best.point, maxClicks, clicks, best.score, best.count)
@@ -494,6 +500,18 @@ object Runner {
         }
         if (slideRetries > 0) AppLog.d("匹配", "滑动等待结束：重试 $slideRetries 次" + if (bad > 0) "（仍有 $bad 格没对齐，按最近排处理）" else "")
         slideRetries = 0
+        // 0.47 半截帧闸门：刚点过，这帧里被点的伙已消、其余怪还在原排、也没有新怪 = 消除动画播完而整盘还没上移。
+        // 在这帧上选点，点击落下时盘面刚好上移，会点到下面一排的邻居或空地（35 局 15 次作废 + 一半的点没清掉目标）。
+        // 等上移完成再扫；不进签名/预测/选点，也不作废上次点击的记消。
+        val stale = if (staleRetries < STALE_MAX_RETRY) BoardMemory.unshiftedMatch(all.map { it.rule.name to it.comp }) else null
+        if (stale != null) {
+            staleRetries++
+            staleFlag = true
+            if (staleRetries == 1) AppLog.d("匹配", "点后画面还没上移：被点的伙已消，其余怪仍在原排（原排吻合 ${stale.first}/${stale.second}，上移后吻合 ${stale.third}），等整盘上移再扫")
+            return null
+        }
+        if (staleRetries > 0) AppLog.d("匹配", "上移等待结束：重试 $staleRetries 次" + if (staleRetries >= STALE_MAX_RETRY) "（到上限，按当前帧处理）" else "")
+        staleRetries = 0
         // 棋盘签名：施法后整盘会上移一行，签名必变；连续一样 = 点击没触发施法。
         // 签名里去掉贴着阈值的临界识别（0.19 实测：蛇 0.71~0.73 对 0.7 阈值，一轮有一轮没，
         // 签名每轮都变、无效果停永远触发不了，才会在结算画面上空点 7 轮）。临界只影响签名，不影响选目标。

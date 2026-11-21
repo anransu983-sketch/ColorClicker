@@ -20,6 +20,7 @@ import kotlin.math.sqrt
  *     以及第 -2 排（已越过城墙线）出现的怪底色。见 auditWall / auditZeroFrame。
  *  6. 0.45：连续性闸门。本帧不是上一轮预测的延续（预测命中 < 一半：结算屏压暗 / 新一波 / 点空）时，
  *     ① 贴墙漏数不计入、不进代点（prevMiss 清空）；② 上一次点击的记消作废，不进「记消」。
+ *  8. 0.47：半截帧检测 unshiftedMatch（点后第一帧伙已消、整盘还没上移），Runner 据此等上移再扫。
  *  7. 0.45b：整帧盖层检测 frameVeil（发白 / 压暗），盖层帧按不连续帧处理。
  *     另：漏数伙作为“幽灵伙”进期限余量（见 ghostComps），代点只认含 -1 排格的伙。
  *  数据存在 filesDir/guard_memory.json。 */
@@ -86,6 +87,7 @@ object BoardMemory {
     private var voidedKills = 0
     private var verifiedCasts = 0   // 0.45：点后核实真正覆盖的施法数（核实只在预测命中 ≥ 一半的轮次做）
     private var discMiss = 0        // 0.45：不连续帧上的漏数格·轮（不计入 wallMiss）
+    private var prevActual: List<Cell> = emptyList()   // 0.47：上一轮 onRound 看到的全部怪（没上移的原排位置），给 unshiftedMatch 用
     private var lastVeil = 0        // 0.45b：上一轮整帧盖层判定（0 无 / 1 发白 / 2 压暗），只用来让日志不刷屏
     private var roundNo = 0
     private var dumps = 0
@@ -142,7 +144,7 @@ object BoardMemory {
         predicted = emptyList(); predTotal = 0; predHit = 0; predNew = 0
         vanished = 0; suspect = 0; overrides = 0; verified = 0; topHit = 0; topTotal = 0; lastPicked = emptyList(); shots = 0
         casts = 0; loggedKills = 0; roundNo = 0; dumps = 0
-        tapCount = 0; pendingKills = 0; pendingCasts = 0; voidedCasts = 0; voidedKills = 0; verifiedCasts = 0; discMiss = 0; lastVeil = 0
+        tapCount = 0; pendingKills = 0; pendingCasts = 0; voidedCasts = 0; voidedKills = 0; verifiedCasts = 0; discMiss = 0; lastVeil = 0; prevActual = emptyList()
         wallMiss = 0; wallMissNew = 0; outMiss = 0; prevMiss = emptySet(); prevMissBest = emptyMap()
         refLogged = false; assistOffLogged = false; assistOffBattle = false
     }
@@ -169,6 +171,25 @@ object BoardMemory {
         if (predicted.isEmpty() || actual.isEmpty()) return true
         val gone = predicted.count { pc -> actual.none { it.type == pc.type && it.col == pc.col && it.row == pc.row } }
         return (predicted.size - gone) * 2 >= predicted.size
+    }
+
+    // ───────────── 0.47 半截帧检测：点后第一帧“伙已消、整盘还没上移” ─────────────
+    // 35 局：15 次作废的帧里，命中+新刷 = 预测只数（±2）的有 11 帧、命中 ≈ 0（如 12 轮 0/12 新刷 12，21 轮 4/25 新刷 21）；
+    // 通常帧的新刷 ≈ 10 只（新怪随整盘上移一起刷出）。说明这些帧是“消除动画已播完、上移还没开始”：位置整齐（过得了滑动闸门）、
+    // 没有新怪，但每只怪都还在原排。bot 在这帧上选点，点击落下时盘面刚好上移，落点换成了下面一排的怪（或空地）——
+    // 下一轮“点后核实”里 surv=整伙、额外消失 1~2 格，就是点到了邻居；作废的那次点击其实是真的清掉了。
+    /** 返回 null = 不是半截帧；否则 (原排吻合格数, 期望只数, 上移后吻合格数)。要求：刚点过、原排吻合 ≥60%、
+     *  明显比上移后吻合多（>2 倍）、且总只数没比期望多出 2 只以上（有新怪 = 已经上移过了）。 */
+    fun unshiftedMatch(comps: List<Pair<String, Matcher.Comp>>): Triple<Int, Int, Int>? {
+        if (pendingCasts == 0 || lastPicked.isEmpty() || prevActual.isEmpty()) return null
+        val picked = lastPicked.toSet()
+        val expect = prevActual.filter { it !in picked }
+        if (expect.size < 3) return null
+        val actual = comps.flatMap { (name, c) -> c.cells.ifEmpty { listOf(c.point) }.map { Cell(name, colOf(it.x), rowOfY(it.y)) } }
+        if (actual.isEmpty() || actual.size > expect.size + 2) return null
+        val same = expect.count { e -> actual.any { it.type == e.type && it.col == e.col && it.row == e.row } }
+        val shifted = predicted.count { p -> actual.any { it.type == p.type && it.col == p.col && it.row == p.row } }
+        return if (same * 10 >= expect.size * 6 && same > shifted * 2) Triple(same, expect.size, shifted) else null
     }
 
     // ───────────── 0.45b 整帧盖层检测（结算屏淡入淡出）─────────────
@@ -283,6 +304,7 @@ object BoardMemory {
             val s = typeStats.getOrPut(name) { TypeStat() }
             s.n++; s.sum += c.score; if (c.score < s.min) s.min = c.score; if (c.score > s.max) s.max = c.score
         }
+        prevActual = actual
         // 4. 预测下一轮：去掉点的那伙，其余上移一行；row < -1 的是撞墙的，不进预测
         lastPicked = if (pick != null) pick.cells.ifEmpty { listOf(pick.point) }.map { Cell(pickRule, colOf(it.x), rowOfY(it.y)) } else emptyList()
         predicted = if (pick != null) {
