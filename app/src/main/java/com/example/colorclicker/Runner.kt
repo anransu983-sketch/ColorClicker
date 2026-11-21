@@ -65,7 +65,7 @@ object Runner {
     fun isRunning() = job?.isActive == true
 
     /** 扎堆比数量的结果：规则、点、该规则的相似度、能消只数 */
-    private data class ClusterPick(val rule: Rule, val point: Point, val score: Double, val count: Int, val aiNote: String? = null)
+    private data class ClusterPick(val rule: Rule, val point: Point, val score: Double, val count: Int)
 
     /** 棋盘第 0 排（贴墙）中心 y 与行距。第 0 排的怪下一次施法后到第 -1 排（y1271）仍可点，再下一次才撞墙 */
     private const val ROW0_Y = 1511
@@ -255,7 +255,7 @@ object Runner {
                     if (slidingFlag) { slidingFlag = false; delay(SLIDE_RETRY_MS); continue }
                     if (best != null) {
                         lastTapFrameSig = sig(frame)
-                        val n = doTap(best.rule, best.point, maxClicks, clicks, best.score, best.count, best.aiNote)
+                        val n = doTap(best.rule, best.point, maxClicks, clicks, best.score, best.count)
                         if (n < 0) { stop(); return@launch }
                         clicks = n
                         acted = true
@@ -278,13 +278,13 @@ object Runner {
         }
     }
 
-    private suspend fun doTap(r: Rule, p: Point, maxClicks: Int, clicks: Int, score: Double? = null, cluster: Int? = null, note: String? = null): Int {
+    private suspend fun doTap(r: Rule, p: Point, maxClicks: Int, clicks: Int, score: Double? = null, cluster: Int? = null): Int {
         // 停了就别再发手势（0.17 实测：停的日志都出了，下一轮的点还发出去了）
         if (job?.isActive != true) {
             AppLog.w("点击", "已停止，本次点击取消 (${p.x},${p.y})")
             return clicks
         }
-        logHit(r, p, score, cluster, note)
+        logHit(r, p, score, cluster)
         val tx = p.x + r.offsetX
         val ty = p.y + r.offsetY
         val ok = ClickService.tap(tx, ty)
@@ -518,76 +518,36 @@ object Runner {
                 .thenBy { it.cand.comp.point.y }
                 .thenByDescending { it.cand.comp.score }
         )
-        // 0.26 AI 判点：把排好序的候选发给 Gemini 选一伙；失败/超时/没开/模型说没得点时用期限规则的 pick。
-        // 模型报的未知怪如果贴墙（第 0/1 排）就优先点它那个格子中心——模板认不出的怪是撞墙的主因。
+        // 0.43 本地最优解：删 AI 判点，改调 Solver.pick（纯本地、无网络）。
+        // 期限规则首选仍算出来，只用来在日志里和求解器的选择对照。
         var pickEv = ranked.first()
-        var aiChanged = false
-        var unknownTap: Point? = null
-        var unknownDesc = ""
-        var unknownCol = -1
-        var unknownRow = -1
-        if (AiJudge.isEnabled(ctx)) {
-            val cands = ranked.take(5).mapIndexed { i, e ->
-                AiJudge.Candidate(i, e.cand.rule.name, e.cand.comp.size, BoardMemory.minRowOf(e.cand.comp), hzText(e.hz), e.cand.comp.point.x, e.cand.comp.point.y)
+        val solverEval = Solver.pick(compsAll)
+        if (solverEval != null) {
+            val solverEv = evs.first { it.cand.comp === solverEval.comp }
+            if (solverEv.cand.comp !== pickEv.cand.comp) {
+                val deadlineEval = Solver.eval(compsAll, pickEv.cand.rule.name, pickEv.cand.comp)
+                AppLog.i("最优解", "最优解改点：期限规则点「${pickEv.cand.rule.name.removePrefix("守卫-")}」${pickEv.cand.comp.size}只（两步${deadlineEval.twoStep}），改点「${solverEval.ruleName.removePrefix("守卫-")}」${solverEval.comp.size}只（两步${solverEval.twoStep}）")
+                pickEv = solverEv
+            } else {
+                AppLog.d("最优解", "最优解和期限规则一致，点「${pickEv.cand.rule.name}」${pickEv.cand.comp.size}只，两步值${solverEval.twoStep}")
             }
-            val verdict = AiJudge.judge(ctx, frame, cands)
-            if (verdict != null) {
-                verdict.unknown?.let { u ->
-                    unknownCol = u.col; unknownRow = u.row; unknownDesc = u.desc
-                    AppLog.i("AI判点", "发现未知怪：${u.desc}（第 ${u.col} 列第 ${u.row} 排）")
-                    if (u.row <= 1) unknownTap = AiJudge.cellCenter(u.col, u.row)
-                }
-                if (unknownTap == null) {
-                    if (verdict.pick in cands.indices) {
-                        val aiEv = ranked[verdict.pick]
-                        // 0.35：AI 只许在和期限规则同余量的候选里挑（比封顶后的余量），
-                        // 不许越级点低余量的——第 21 局 00:23:53 模型越过余量 3 的蝎子 1 只、
-                        // 点了余量 2 的史莱姆 3 只。0.28 的越线兜底是它的特例（越线余量 -1
-                        // 比不越线低，一定被这道拦下）。
-                        // 0.37：再加只数关——同余量也只许选只数不小于期限规则那伙的。
-                        // 0.35 没拦住同余量看小：23 局三连（蝎子 2 只替史莱姆 7 只，影子
-                        // 差 +5.0；土豆 2 只替树怪 4 只；土豆 5 只替史莱姆 6 只）、25 局
-                        // 两连（史莱姆 1 只替土豆怪 2 只；树怪 2 只替蛇 4 只），影子全判
-                        // 更差。加了这道，AI 能动的只剩同余量同只数的平局（按位置挑）。
-                        if (minOf(aiEv.hz, HZ_CAP) < minOf(pickEv.hz, HZ_CAP)) {
-                            AppLog.w("AI判点", "AI 选了余量更低的「${aiEv.cand.rule.name.removePrefix("守卫-")}」${aiEv.cand.comp.size}只（${hzText(aiEv.hz)}），期限规则是「${pickEv.cand.rule.name.removePrefix("守卫-")}」${pickEv.cand.comp.size}只（${hzText(pickEv.hz)}），改回期限规则")
-                        } else if (aiEv.cand.comp.size < pickEv.cand.comp.size) {
-                            AppLog.w("AI判点", "AI 选了只数更少的「${aiEv.cand.rule.name.removePrefix("守卫-")}」${aiEv.cand.comp.size}只（${hzText(aiEv.hz)}），期限规则是「${pickEv.cand.rule.name.removePrefix("守卫-")}」${pickEv.cand.comp.size}只（${hzText(pickEv.hz)}），改回期限规则")
-                        } else if (aiEv.cand.comp !== pickEv.cand.comp) {
-                            aiChanged = true
-                            AppLog.i("AI判点", "选第 ${verdict.pick} 伙「${aiEv.cand.rule.name.removePrefix("守卫-")}」${aiEv.cand.comp.size}只（第${BoardMemory.minRowOf(aiEv.cand.comp)}排，${hzText(aiEv.hz)}），期限规则本来选「${pickEv.cand.rule.name.removePrefix("守卫-")}」${pickEv.cand.comp.size}只")
-                            pickEv = aiEv
-                        } else {
-                            AppLog.d("AI判点", "和期限规则一致，点「${pickEv.cand.rule.name}」${pickEv.cand.comp.size}只")
-                        }
-                    } else if (verdict.pick == -1) {
-                        AppLog.d("AI判点", "模型说没有能点的，退回期限规则")
-                    }
-                }
-            }
-        }
-        if (unknownTap != null) {
-            val cell = unknownTap!!
-            pickEv = Ev(Cand(pickEv.cand.rule, Matcher.Comp(cell, 1, 0.0, ys = listOf(cell.y), cells = listOf(cell))), pickEv.hz)
         }
         // 0.39 贴墙漏数代点：上一轮漏数的第 0 排怪现在已到 -1 排，下一施法就撞墙；
         // 模板认不出它、底色却有怪，坐标是清楚的。期限规则点的不是 -1 排时改点它——
-        // 不点它就等撞墙。AI 未知怪已接管时不叠加。
+        // 不点它就等撞墙。
         var wallFallback: Point? = null
         var wallFallbackCol = -1
         var origPickDesc = ""
-        if (unknownTap == null) {
-            val detectedCells = all.flatMap { it.comp.cells.ifEmpty { listOf(it.comp.point) } }
-                .map { Pair(colOf(it.x), rowOf(it.y)) }.toSet()
-            val fb = BoardMemory.wallMissFallback(detectedCells)
-            if (fb.isNotEmpty() && BoardMemory.minRowOf(pickEv.cand.comp) > -1) {
-                origPickDesc = "${pickEv.cand.rule.name.removePrefix("守卫-")}${pickEv.cand.comp.size}只（第${BoardMemory.minRowOf(pickEv.cand.comp)}排，${hzText(pickEv.hz)}）"
-                val (fc, _) = fb.minByOrNull { it.first }!!
-                wallFallbackCol = fc
-                wallFallback = BoardMemory.cellCenter(fc, -1)
-                val cell = wallFallback!!
-                pickEv = Ev(Cand(WALL_FALLBACK_RULE, Matcher.Comp(cell, 1, 0.0, ys = listOf(cell.y), cells = listOf(cell))), pickEv.hz)
-            }
+        val detectedCells = all.flatMap { it.comp.cells.ifEmpty { listOf(it.comp.point) } }
+            .map { Pair(colOf(it.x), rowOf(it.y)) }.toSet()
+        val fb = BoardMemory.wallMissFallback(detectedCells)
+        if (fb.isNotEmpty() && BoardMemory.minRowOf(pickEv.cand.comp) > -1) {
+            origPickDesc = "${pickEv.cand.rule.name.removePrefix("守卫-")}${pickEv.cand.comp.size}只（第${BoardMemory.minRowOf(pickEv.cand.comp)}排，${hzText(pickEv.hz)}）"
+            val (fc, _) = fb.minByOrNull { it.first }!!
+            wallFallbackCol = fc
+            wallFallback = BoardMemory.cellCenter(fc, -1)
+            val cell = wallFallback!!
+            pickEv = Ev(Cand(WALL_FALLBACK_RULE, Matcher.Comp(cell, 1, 0.0, ys = listOf(cell.y), cells = listOf(cell))), pickEv.hz)
         }
         val pick = pickEv.cand
         val bySize = evs.sortedWith(compareByDescending<Ev> { it.cand.comp.size }.thenBy { it.cand.comp.point.y }).first()
@@ -611,13 +571,11 @@ object Runner {
         }
         if (wallFallback != null) {
             AppLog.w("匹配", "$summary → 贴墙漏数代点：第 ${wallFallbackCol + 1} 列第 -1 排（${wallFallback!!.x},${wallFallback!!.y}）（模板没认出、底色有怪，马上撞墙；期限规则本来点「$origPickDesc」）候选前三：$top3")
-        } else if (unknownTap != null) {
-            AppLog.d("匹配", "$summary → AI判点：点未知怪「$unknownDesc」（第 $unknownCol 列第 $unknownRow 排，(${unknownTap!!.x},${unknownTap!!.y})）候选前三：$top3")
         } else {
             AppLog.d("匹配", "$summary → 点「${pick.rule.name}」（连成 ${pick.comp.size} 只，其中贴墙 $wallCnt 只，y${pick.comp.point.y}，相似度 ${"%.3f".format(pick.comp.score)}，${hzText(pickEv.hz)}）候选前三：$top3")
         }
         AppLog.d("性能", "本轮识别 ${(t3 - t0) / 1_000_000}ms（截图转换 ${(t1 - t0) / 1_000_000} / 匹配 ${(t2 - t1) / 1_000_000} / 决策 ${(t3 - t2) / 1_000_000}）")
-        if (unknownTap == null && wallFallback == null && !aiChanged && bySize.cand.comp !== pick.comp && bySize.cand.comp.size > pick.comp.size) {
+        if (wallFallback == null && bySize.cand.comp !== pick.comp && bySize.cand.comp.size > pick.comp.size) {
             BoardMemory.noteOverride()
             AppLog.w("匹配", "期限优先：只数最大的「${bySize.cand.rule.name.removePrefix("守卫-")}」${bySize.cand.comp.size}只，点完它 ${hzText(bySize.hz)}；改点「${pick.rule.name.removePrefix("守卫-")}」${pick.comp.size}只（${hzText(pickEv.hz)}）")
         }
@@ -626,17 +584,12 @@ object Runner {
         val diagTpls = clusterRules.mapIndexedNotNull { i, r -> tpls[i]?.let { r.name to it } }
         BoardMemory.onRound(compsAll, pick.comp, pick.rule.name, frame, near, diagTpls)?.let { AppLog.d("记忆", it) }
         pendingBoardSig = roundSig
-        val aiNote = if (unknownTap != null) "未知怪「$unknownDesc」（第 $unknownCol 列第 $unknownRow 排）" else null
-        return ClusterPick(pick.rule, pick.comp.point, pick.comp.score, pick.comp.size, aiNote)
+        return ClusterPick(pick.rule, pick.comp.point, pick.comp.score, pick.comp.size)
     }
 
-    private fun logHit(r: Rule, p: Point, score: Double? = null, cluster: Int? = null, note: String? = null) {
+    private fun logHit(r: Rule, p: Point, score: Double? = null, cluster: Int? = null) {
         val tx = p.x + r.offsetX
         val ty = p.y + r.offsetY
-        if (note != null) {
-            AppLog.d("匹配", "AI判点：$note，点击 ($tx,$ty)", tx, ty)
-            return
-        }
         if (r.type == "color") {
             AppLog.d("匹配", "规则「${r.name}」找色 ${r.colorHex} ±${r.tolerance} → 命中 (${p.x},${p.y})，点击 ($tx,$ty)", tx, ty)
         } else {

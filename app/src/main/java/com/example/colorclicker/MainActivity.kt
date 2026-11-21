@@ -27,7 +27,6 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.input.KeyboardType
-import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.unit.dp
 import androidx.core.content.ContextCompat
 import androidx.core.content.FileProvider
@@ -78,9 +77,6 @@ class MainActivity : ComponentActivity() {
         var updateError by remember { mutableStateOf("") }
         var updateChecked by remember { mutableStateOf(false) }
         var loopLimit by remember { mutableStateOf(RuleStore.getLoopLimit(ctx).toString()) }
-        var aiKey by remember { mutableStateOf(AiJudge.getApiKey(ctx)) }
-        var aiModel by remember { mutableStateOf(AiJudge.getModel(ctx)) }
-        var aiOn by remember { mutableStateOf(AiJudge.isEnabled(ctx)) }
         fun persist() = RuleStore.save(ctx, rules.toList())
 
         // 启动后静默检查一次更新（没网/没新版时什么都不弹）
@@ -183,46 +179,6 @@ class MainActivity : ComponentActivity() {
                             }
                         }) { Text("分享结算标题图（最新一张）") }
                         Text("打完回挑战页时从结算屏上自裁的那张标题图（settle_title_…png），认不到结算屏时点这个发出来，我拿它做新模板。", style = MaterialTheme.typography.bodySmall)
-                        Text("AI 判点（Gemini 免费）", style = MaterialTheme.typography.titleSmall)
-                        OutlinedTextField(
-                            aiKey,
-                            { v -> aiKey = v; AiJudge.setApiKey(ctx, v) },
-                            label = { Text("Gemini API Key（只存本机）") },
-                            modifier = Modifier.fillMaxWidth(), singleLine = true,
-                            visualTransformation = PasswordVisualTransformation()
-                        )
-                        OutlinedTextField(
-                            aiModel,
-                            { v -> aiModel = v; AiJudge.setModel(ctx, v) },
-                            label = { Text("模型名") },
-                            modifier = Modifier.fillMaxWidth(), singleLine = true
-                        )
-                        Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                            Text("AI 判点")
-                            Switch(aiOn, { on ->
-                                aiOn = on; AiJudge.setEnabled(ctx, on)
-                                if (on && AiJudge.getApiKey(ctx).isBlank()) Toast.makeText(ctx, "先填 Gemini API Key", Toast.LENGTH_SHORT).show()
-                            })
-                            Text(if (aiOn) "开" else "关", style = MaterialTheme.typography.bodySmall)
-                        }
-                        Text("Key 在 Google AI Studio 免费领：aistudio.google.com → Create API Key，粘贴进来就行，不用绑卡。模型默认 gemini-3.5-flash-lite（免费每天 500 次，够打十几局）；想换更强的 gemini-3.8-flash 也行，但每天只有 20 次（约一局）。每轮棋盘图发给 Gemini 判点第几伙（只发游戏画面），超时 30 秒自动退回期限规则；谷歌不通时日志里会报 AI判点调用失败，先开梦盒代理再打。", style = MaterialTheme.typography.bodySmall)
-                        OutlinedButton({
-                            val dir = ctx.getExternalFilesDir(null)
-                            val latest = dir?.listFiles { f -> f.name.startsWith("ai_unknown_tpl_") && f.name.endsWith(".png") }
-                                ?.maxByOrNull { it.lastModified() }
-                            if (latest == null) {
-                                Toast.makeText(ctx, "还没裁过未知怪模板", Toast.LENGTH_SHORT).show()
-                            } else {
-                                val uri = FileProvider.getUriForFile(ctx, "${ctx.packageName}.fileprovider", latest)
-                                val send = Intent(Intent.ACTION_SEND).apply {
-                                    type = "image/png"
-                                    putExtra(Intent.EXTRA_STREAM, uri)
-                                    addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
-                                }
-                                ctx.startActivity(Intent.createChooser(send, "分享未知怪模板"))
-                            }
-                        }) { Text("分享未知怪模板（最新一张）") }
-                        Text("AI 报未知怪时自动裁的那张图（ai_unknown_tpl_…png），点这个就能发出来，不用进文件管理器翻 Android/data。", style = MaterialTheme.typography.bodySmall)
                     }
                 }
                 item { Text("规则（从上到下依次检测，命中即点击）", style = MaterialTheme.typography.titleSmall) }

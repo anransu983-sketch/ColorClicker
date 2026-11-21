@@ -1,0 +1,49 @@
+package com.example.colorclicker
+
+/**
+ * 0.43 本地最优解求解器（删 AI 判点的替代）：
+ * 纯本地计算，无网络、无 Key、无等待。输入本轮所有伙，输出该点的一伙。
+ *
+ * 选点顺序（安全永远优先于只数）：
+ *  1) 余量 min(hz, HZ_CAP=6) 大优先——hz 是点完该伙后其余伙还能撑几轮，-1 = 点完即撞墙；
+ *  2) 两步值大优先——本轮只数 + 下轮最大一伙只数；
+ *  3) 本轮只数大优先；
+ *  4) 最靠墙（minRow 小）优先；
+ *  5) 相似度大优先。
+ * 深度只做到两步：更深的步数要假装知道随机新刷的怪，是假精度，不做。
+ * 两步值用全权重（不是以前影子模式的 0.5）：下一步就是紧接着的一次施法，
+ * 下轮最大一伙来自已存活的格子；新刷的怪未知，两边都不算，所以不用折扣。
+ */
+object Solver {
+    data class Eval(
+        val ruleName: String,
+        val comp: Matcher.Comp,
+        val hz: Int,
+        val twoStep: Int,
+        val nextMax: Int,
+        val ends: Boolean
+    )
+
+    /** 给一伙打分：余量 + 模拟下一步（复用 BoardMemory.simulateNextStats，不另写分组逻辑）。 */
+    fun eval(compsAll: List<Pair<String, Matcher.Comp>>, ruleName: String, comp: Matcher.Comp): Eval {
+        val hz = BoardMemory.horizonAfterKill(compsAll, comp)
+        val (ends, nextMax, _) = BoardMemory.simulateNextStats(compsAll, comp, ruleName)
+        // ends 时 nextMax 已是 0，两步值就是本轮只数。
+        return Eval(ruleName, comp, hz, comp.size + nextMax, nextMax, ends)
+    }
+
+    /** 选出本轮该点的一伙；空棋盘返回 null。hz == -1（点完即撞墙）的候选一律排除，
+     *  除非全部候选都是 -1（那局反正要结束，选只数最大的）。 */
+    fun pick(compsAll: List<Pair<String, Matcher.Comp>>): Eval? {
+        if (compsAll.isEmpty()) return null
+        val evals = compsAll.map { (name, comp) -> eval(compsAll, name, comp) }
+        val pool = evals.filter { it.hz != -1 }.ifEmpty { evals }
+        return pool.sortedWith(
+            compareByDescending<Eval> { minOf(it.hz, BoardMemory.HZ_CAP) }
+                .thenByDescending { it.twoStep }
+                .thenByDescending { it.comp.size }
+                .thenBy { BoardMemory.minRowOf(it.comp) }
+                .thenByDescending { it.comp.score }
+        ).first()
+    }
+}

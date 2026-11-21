@@ -15,7 +15,7 @@ import kotlin.math.sqrt
  *     再移一格才撞墙。一次施法只能清一伙，所以“有几伙在期限前要清”比“一伙有几只”更决定存活。
  *  2. 棋盘预测校验 + 缺口诊断（扩）：预测对不上的格子逐个列出（“预测有而实测无”），近阈值漏数嫌疑，必要时存诊断截图。
  *  3. 相似度记忆：每种怪相似度均值/最低，跨局存盘。
- *  4. 影子前瞻（改）：只在“同样安全”的候选里比两步值；分歧时记 差值，跨局累计，供判断要不要转正。
+ *  4. 两步前瞻（0.43）：0.43 前只做影子记录；0.43 起改由 Solver.pick 直接选点，onRound 不再累计分歧。
  *  5. 贴墙漏数日志（0.38，只记不改决策）：用「颜色辅助」的格子底色，量第 -1/0/1 排里“有怪底色却没检出”的格数，
  *     以及第 -2 排（已越过城墙线）出现的怪底色。见 auditWall / auditZeroFrame。
  *  数据存在 filesDir/guard_memory.json。 */
@@ -73,9 +73,6 @@ object BoardMemory {
     private var shots = 0
     private var suspect = 0
     private var overrides = 0
-    private var shadowAgree = 0
-    private var shadowDiffer = 0
-    private var shadowGain = 0.0
     private var casts = 0
     private var loggedKills = 0
     private var roundNo = 0
@@ -127,7 +124,6 @@ object BoardMemory {
         load(ctx)
         predicted = emptyList(); predTotal = 0; predHit = 0; predNew = 0
         vanished = 0; suspect = 0; overrides = 0; verified = 0; topHit = 0; topTotal = 0; lastPicked = emptyList(); shots = 0
-        shadowAgree = 0; shadowDiffer = 0; shadowGain = 0.0
         casts = 0; loggedKills = 0; roundNo = 0; dumps = 0
         wallMiss = 0; wallMissNew = 0; outMiss = 0; prevMiss = emptySet()
         refLogged = false; assistOffLogged = false; assistOffBattle = false
@@ -137,7 +133,7 @@ object BoardMemory {
     fun noteOverride() { overrides++ }
 
     /** 每轮调用一次。comps=本轮所有伙（规则名→伙），pick=实际点的那伙（0.19 起是期限优先选出的）。
-     *  frame/near 只用于缺口诊断（可不传）。返回影子前瞻提示（无分歧时为 null）。 */
+     *  frame/near 只用于缺口诊断（可不传）。0.43 起恒返回 null（两步前瞻已由 Solver 直接选点）。 */
     fun onRound(
         comps: List<Pair<String, Matcher.Comp>>,
         pick: Matcher.Comp?,
@@ -207,39 +203,17 @@ object BoardMemory {
                 .map { Cell(pickRule, colOf(it.x), rowOfY(it.y)) }.toSet()
             actual.filter { it !in picked }.map { Cell(it.type, it.col, it.row - 1) }.filter { it.row >= -1 }
         } else actual
-        // 5. 影子前瞻：只在“和实际点的一样安全”的候选里，比 本轮只数 + 0.5×下轮最大一伙只数
-        if (pick == null || comps.size < 2) return null
-        val pickHz = horizonAfterKill(comps, pick)
-        val floor = minOf(pickHz, HZ_CAP)
-        data class Two(val name: String, val comp: Matcher.Comp, val two: Double, val next: Double, val ends: Boolean)
-        fun twoOf(name: String, c: Matcher.Comp): Two {
-            val (ends, next) = simulateNext(actual, c, name)
-            return Two(name, c, c.size + if (ends) 0.0 else 0.5 * next, next, ends)
-        }
-        val pickTwo = twoOf(pickRule, pick)
-        val alts = comps.sortedByDescending { it.second.size }.take(4)
-            .filter { it.second !== pick && minOf(horizonAfterKill(comps, it.second), HZ_CAP) >= floor }
-            .map { twoOf(it.first, it.second) }
-        val bestAlt = alts.maxByOrNull { it.two }
-        return if (bestAlt != null && bestAlt.two > pickTwo.two + 0.01) {
-            shadowDiffer++
-            shadowGain += bestAlt.two - pickTwo.two
-            "记忆·前瞻：实点「${pickRule.removePrefix("守卫-")}」${pick.size}只（两步值${"%.1f".format(pickTwo.two)}）；" +
-                "两步算「${bestAlt.name.removePrefix("守卫-")}」${bestAlt.comp.size}只更优（${"%.1f".format(bestAlt.two)}，" +
-                "差 +${"%.1f".format(bestAlt.two - pickTwo.two)}），本轮仍按实点（影子模式）"
-        } else {
-            shadowAgree++
-            null
-        }
+        // 5. 0.43 已删：两步前瞻改由 Solver.pick 直接选点，onRound 不再返回提示。
+        return null
     }
 
     // 0.33 HZ_CAP 3 → 6（只改选点）：封顶 3 会把余量 3/4/5/6/∞ 的候选当成一样安全，再按只数选，
     // 等于在“能多活几次施法”这一项上不分高下；模拟里余量封顶 ≥6 与不封顶等效，比封顶 3 多拿 3%~17% 总只数。
-    // Runner 与影子前瞻同用这个值（Runner 里 HZ_CAP = BoardMemory.HZ_CAP），不用另改。
+    // Runner 与 Solver 同用这个值（Runner 里 HZ_CAP = BoardMemory.HZ_CAP），不用另改。
     const val HZ_CAP = 6
 
     /** 模拟：点掉 tapped 一伙后其余上移一格。返回（是否有怪越线，下轮最大一伙只数）。 */
-    private fun simulateNext(actual: List<Cell>, tapped: Matcher.Comp, tappedName: String): Pair<Boolean, Double> {
+    fun simulateNext(actual: List<Cell>, tapped: Matcher.Comp, tappedName: String): Pair<Boolean, Double> {
         val tappedCells = tapped.cells.ifEmpty { listOf(tapped.point) }
             .map { Cell(tappedName, colOf(it.x), rowOfY(it.y)) }.toSet()
         val rest = actual.filter { it !in tappedCells }.map { Cell(it.type, it.col, it.row - 1) }
@@ -247,6 +221,19 @@ object BoardMemory {
         val groups = groupCells(rest)
         if (groups.isEmpty()) return false to 0.0
         return false to groups.maxOf { it.size }.toDouble()
+    }
+
+    /** 0.43 本地最优解用：模拟点掉 tapped 一伙后下一轮的情况。
+     *  返回（是否有怪越线，下轮最大一伙只数，下轮 row<=0 的格数）。复用 simulateNext，不改它的语义。 */
+    fun simulateNextStats(all: List<Pair<String, Matcher.Comp>>, tapped: Matcher.Comp, tappedName: String): Triple<Boolean, Int, Int> {
+        val actual = all.flatMap { (name, c) ->
+            c.cells.ifEmpty { listOf(c.point) }.map { Cell(name, colOf(it.x), rowOfY(it.y)) }
+        }
+        val (ends, next) = simulateNext(actual, tapped, tappedName)
+        val tappedCells = tapped.cells.ifEmpty { listOf(tapped.point) }
+            .map { Cell(tappedName, colOf(it.x), rowOfY(it.y)) }.toSet()
+        val threat = actual.filter { it !in tappedCells }.count { it.row - 1 <= 0 }
+        return Triple(ends, next.toInt(), threat)
     }
 
     /** 按上下左右相连分伙（和 Matcher 一致：斜向不算一伙）。 */
@@ -463,28 +450,25 @@ object BoardMemory {
 
     /** 一局结束时记一笔：没打过（0 施法 0 预测）就静默，只清预测。 */
     fun endBattle(ctx: Context) {
-        if (casts == 0 && predTotal == 0 && shadowAgree == 0 && shadowDiffer == 0) {
+        if (casts == 0 && predTotal == 0) {
             predicted = emptyList()
             return
         }
         battles++
         cumPredHit += predHit; cumPredTotal += predTotal; cumVanished += vanished; cumSuspect += suspect
         cumVerified += verified; cumTopHit += topHit; cumTopTotal += topTotal
-        cumOverrides += overrides; cumDivN += shadowDiffer; cumDivGain += shadowGain
+        cumOverrides += overrides
         cumCasts += casts; cumKills += loggedKills
         cumWallMiss += wallMiss; cumWallMissNew += wallMissNew; cumOutMiss += outMiss
         save(ctx)
         val pred = if (predTotal > 0) "$predHit/$predTotal" else "—"
         AppLog.i("记忆", "本局记忆：施法 $casts 次，记消 $loggedKills 只（${"%.2f".format(if (casts > 0) loggedKills.toDouble() / casts else 0.0)} 只/次）；" +
             "预测命中 $pred 格，新刷 $predNew 只；预测有而实测无 $vanished 格；近阈值漏数嫌疑 $suspect 格；" +
-            wallMissText() + "期限优先改点 $overrides 次；" +
-            "影子前瞻一致 $shadowAgree 次、不同 $shadowDiffer 次" + if (shadowDiffer > 0) "（平均差 +${"%.2f".format(shadowGain / shadowDiffer)}）" else "")
+            wallMissText() + "期限优先改点 $overrides 次")
         AppLog.i("记忆", "核实对账：记消 $loggedKills 只；点后核实清掉 $verified 只（逐施法对照前后棋盘，不依赖结算；两者差 ${verified - loggedKills}）；" +
             "上部(排≤4)预测命中 ${if (topTotal > 0) "$topHit/$topTotal" else "—"}；漏数嫌疑 $suspect 格；" + wallMissText().trimEnd('；'))
         val rate = if (cumPredTotal > 0) "%.1f%%".format(100.0 * cumPredHit / cumPredTotal) else "—"
-        AppLog.i("记忆", "累计 $battles 局：预测命中率 $rate（上部 ${if (cumTopTotal > 0) "%.1f%%".format(100.0 * cumTopHit / cumTopTotal) else "—"}），前瞻分歧 $cumDivN 次" +
-            (if (cumDivN > 0) "（平均差 +${"%.2f".format(cumDivGain / cumDivN)}）" else "") +
-            "，期限优先改点 $cumOverrides 次，累计施法 $cumCasts 次 / 记消 $cumKills 只")
+        AppLog.i("记忆", "累计 $battles 局：预测命中率 $rate（上部 ${if (cumTopTotal > 0) "%.1f%%".format(100.0 * cumTopHit / cumTopTotal) else "—"}），期限优先改点 $cumOverrides 次，累计施法 $cumCasts 次 / 记消 $cumKills 只")
         AppLog.i("记忆", "贴墙漏数累计：$cumWallMiss 格·轮（约 $cumWallMissNew 只），贴墙外 $cumOutMiss 格（含本局）")
         val sim = typeStats.entries.sortedBy { it.key }
             .joinToString(" ") { "${it.key.removePrefix("守卫-")}出现${it.value.n}次均${"%.2f".format(it.value.avg)}最低${"%.2f".format(it.value.min)}" }
@@ -511,9 +495,7 @@ object BoardMemory {
         sb.append("棋盘预测命中 $cumPredHit/$cumPredTotal（$rate），上部（排≤4）$cumTopHit/$cumTopTotal（$topRate）\n")
         sb.append("点后核实清掉 $cumVerified 只，预测有而实测无 $cumVanished 格，漏数嫌疑 $cumSuspect 格\n")
         sb.append("贴墙漏数 $cumWallMiss 格·轮（约 $cumWallMissNew 只），贴墙外 $cumOutMiss 格\n")
-        sb.append("期限优先改点 $cumOverrides 次；影子前瞻分歧 $cumDivN 次")
-        if (cumDivN > 0) sb.append("（平均差 +${"%.2f".format(cumDivGain / cumDivN)}）")
-        sb.append("，仍在影子模式，没改决策\n")
+        sb.append("期限优先改点 $cumOverrides 次\n")
         val sim = typeStats.entries.sortedBy { it.key }
             .joinToString("\n") { "「${it.key.removePrefix("守卫-")}」出现 ${it.value.n} 次，均值 ${"%.2f".format(it.value.avg)}，最低 ${"%.2f".format(it.value.min)}" }
         if (sim.isNotEmpty()) sb.append("相似度累计：\n$sim")
