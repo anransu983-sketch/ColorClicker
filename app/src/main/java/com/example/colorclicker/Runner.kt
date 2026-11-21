@@ -515,7 +515,7 @@ object Runner {
         // 0.45：漏数幽灵伙。本帧不是上一轮预测的延续（结算屏 / 新一波）时一律不信漏数。
         val detectedCells = all.flatMap { it.comp.cells.ifEmpty { listOf(it.comp.point) } }
             .map { Pair(colOf(it.x), rowOf(it.y)) }.toSet()
-        val liveFrame = BoardMemory.continuesPrediction(compsAll)
+        val liveFrame = BoardMemory.continuesPrediction(compsAll) && !BoardMemory.frameVeiled(frame)   // 0.45b：发白/压暗盖层帧也不算 live
         // 已识别的伙里有贴墙（-1 排）的：它是确定存在的，漏数格（可能误报）不能拿它换；此时含 -1 排格的幽灵伙
         // 不进求解器（否则人人 hz=-1，求解器会放弃这个确定的 -1 排伙去点别的），只让 0 排的幽灵伙进余量。
         val detectedAtWall = all.any { BoardMemory.minRowOf(it.comp) <= -1 }

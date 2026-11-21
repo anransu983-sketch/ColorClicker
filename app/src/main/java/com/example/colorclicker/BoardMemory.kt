@@ -20,6 +20,7 @@ import kotlin.math.sqrt
  *     以及第 -2 排（已越过城墙线）出现的怪底色。见 auditWall / auditZeroFrame。
  *  6. 0.45：连续性闸门。本帧不是上一轮预测的延续（预测命中 < 一半：结算屏压暗 / 新一波 / 点空）时，
  *     ① 贴墙漏数不计入、不进代点（prevMiss 清空）；② 上一次点击的记消作废，不进「记消」。
+ *  7. 0.45b：整帧盖层检测 frameVeil（发白 / 压暗），盖层帧按不连续帧处理。
  *     另：漏数伙作为“幽灵伙”进期限余量（见 ghostComps），代点只认含 -1 排格的伙。
  *  数据存在 filesDir/guard_memory.json。 */
 object BoardMemory {
@@ -85,6 +86,7 @@ object BoardMemory {
     private var voidedKills = 0
     private var verifiedCasts = 0   // 0.45：点后核实真正覆盖的施法数（核实只在预测命中 ≥ 一半的轮次做）
     private var discMiss = 0        // 0.45：不连续帧上的漏数格·轮（不计入 wallMiss）
+    private var lastVeil = 0        // 0.45b：上一轮整帧盖层判定（0 无 / 1 发白 / 2 压暗），只用来让日志不刷屏
     private var roundNo = 0
     private var dumps = 0
     private var battles = 0
@@ -140,7 +142,7 @@ object BoardMemory {
         predicted = emptyList(); predTotal = 0; predHit = 0; predNew = 0
         vanished = 0; suspect = 0; overrides = 0; verified = 0; topHit = 0; topTotal = 0; lastPicked = emptyList(); shots = 0
         casts = 0; loggedKills = 0; roundNo = 0; dumps = 0
-        tapCount = 0; pendingKills = 0; pendingCasts = 0; voidedCasts = 0; voidedKills = 0; verifiedCasts = 0; discMiss = 0
+        tapCount = 0; pendingKills = 0; pendingCasts = 0; voidedCasts = 0; voidedKills = 0; verifiedCasts = 0; discMiss = 0; lastVeil = 0
         wallMiss = 0; wallMissNew = 0; outMiss = 0; prevMiss = emptySet(); prevMissBest = emptyMap()
         refLogged = false; assistOffLogged = false; assistOffBattle = false
     }
@@ -169,6 +171,41 @@ object BoardMemory {
         return (predicted.size - gone) * 2 >= predicted.size
     }
 
+    // ───────────── 0.45b 整帧盖层检测（结算屏淡入淡出）─────────────
+    // 04 号像素实测：last2 发白（色度 ≈ 灰 0.342/0.336/0.322），last1 压暗（色度仍 ≈ 空地 0.432/0.361/0.207，亮度只有空地 229 的约 1/6）。
+    // 两种都是盖层：发白时空地色度离参考 0.16、压暗时判据因亮度低而不可靠，都会冒出假漏数。
+    // 注意方向：压暗（亮度↓、色度不变）和注释里 0.38 起的认识一致；发白（亮度↑、色度→灰）是另一个相位，两种都要拦。
+    private const val SAND_BRIGHT = 229
+    private const val GREY_DIST = 0.05
+    private val GREY = doubleArrayOf(1.0 / 3, 1.0 / 3, 1.0 / 3)
+
+    /** 0 = 正常；1 = 发白（≥80% 的格角色度贴近灰色）；2 = 压暗（空地色度的角里 ≥80% 亮度低于 229 的一半，且这样的角 ≥8 个）。
+     *  只取第 0~6 排每格下面两个角（84 个 7×7 块，约 1~2ms），不碰模板。取不全/出错返回 0（不误拦）。 */
+    fun frameVeil(frame: Bitmap?): Int {
+        if (frame == null || frame.isRecycled) return 0
+        return try {
+            var total = 0; var grey = 0; var sandLike = 0; var dark = 0
+            for (r in 0..6) for (c in 0..5) {
+                val cx = COL0_X + c * STEP; val cy = ROW0_Y + r * STEP
+                for (dx in listOf(-CORNER, CORNER)) {
+                    val px = patch(frame, cx + dx, cy + CORNER) ?: continue
+                    total++
+                    val ch = px.chroma()
+                    if (cdist(ch, GREY) < GREY_DIST) grey++
+                    else if (cdist(ch, refChroma) <= NOT_SAND) { sandLike++; if (px.bright * 2 < SAND_BRIGHT) dark++ }
+                }
+            }
+            when {
+                total < 40 -> 0
+                grey * 10 >= total * 8 -> 1
+                sandLike >= 8 && dark * 10 >= sandLike * 8 -> 2
+                else -> 0
+            }
+        } catch (e: Exception) { 0 }
+    }
+
+    fun frameVeiled(frame: Bitmap?): Boolean = frameVeil(frame) != 0
+
     /** Runner 选点前问：当前识别结果是不是上一轮预测的延续（不是就别信漏数、别代点）。 */
     fun continuesPrediction(comps: List<Pair<String, Matcher.Comp>>): Boolean =
         continues(comps.flatMap { (name, c) -> c.cells.ifEmpty { listOf(c.point) }.map { Cell(name, colOf(it.x), rowOfY(it.y)) } })
@@ -189,7 +226,12 @@ object BoardMemory {
             c.cells.ifEmpty { listOf(c.point) }.map { Cell(name, colOf(it.x), rowOfY(it.y)) }
         }
         // 0.45：本帧是不是上一轮预测的延续；先结算上次点击的记消，再做贴墙漏数
-        val live = continues(actual)
+        val veil = frameVeil(frame)
+        if (veil != 0 && veil != lastVeil) {
+            AppLog.w("记忆", "整帧被盖层盖住（" + (if (veil == 1) "发白：多数格角色度趋近灰色" else "压暗：空地色度没变但亮度不到正常的一半") + "），按不连续帧处理：不计漏数、不代点、点后记消作废")
+        }
+        lastVeil = veil
+        val live = veil == 0 && continues(actual)
         settlePending(live)
         // 0. 0.38 贴墙漏数日志：只读这一帧已抓到的像素，不改任何决策（0.45：不连续帧不计入、不进代点）
         if (frame != null) {
