@@ -18,6 +18,9 @@ import kotlin.math.sqrt
  *  4. 两步前瞻（0.43）：0.43 前只做影子记录；0.43 起改由 Solver.pick 直接选点，onRound 不再累计分歧。
  *  5. 贴墙漏数日志（0.38，只记不改决策）：用「颜色辅助」的格子底色，量第 -1/0/1 排里“有怪底色却没检出”的格数，
  *     以及第 -2 排（已越过城墙线）出现的怪底色。见 auditWall / auditZeroFrame。
+ *  6. 0.45：连续性闸门。本帧不是上一轮预测的延续（预测命中 < 一半：结算屏压暗 / 新一波 / 点空）时，
+ *     ① 贴墙漏数不计入、不进代点（prevMiss 清空）；② 上一次点击的记消作废，不进「记消」。
+ *     另：漏数伙作为“幽灵伙”进期限余量（见 ghostComps），代点只认含 -1 排格的伙。
  *  数据存在 filesDir/guard_memory.json。 */
 object BoardMemory {
     private const val COL0_X = 117
@@ -73,8 +76,15 @@ object BoardMemory {
     private var shots = 0
     private var suspect = 0
     private var overrides = 0
-    private var casts = 0
-    private var loggedKills = 0
+    private var casts = 0           // 0.45 起 = 已确认的施法（点后棋盘是预测的延续）
+    private var loggedKills = 0     // 0.45 起 = 已确认施法的记消
+    private var tapCount = 0        // 0.45：实际发出的点击数
+    private var pendingKills = 0    // 0.45：已点、还没被下一轮棋盘确认的记消
+    private var pendingCasts = 0
+    private var voidedCasts = 0     // 0.45：点后棋盘对不上预测，记消作废的次数 / 只数
+    private var voidedKills = 0
+    private var verifiedCasts = 0   // 0.45：点后核实真正覆盖的施法数（核实只在预测命中 ≥ 一半的轮次做）
+    private var discMiss = 0        // 0.45：不连续帧上的漏数格·轮（不计入 wallMiss）
     private var roundNo = 0
     private var dumps = 0
     private var battles = 0
@@ -130,11 +140,38 @@ object BoardMemory {
         predicted = emptyList(); predTotal = 0; predHit = 0; predNew = 0
         vanished = 0; suspect = 0; overrides = 0; verified = 0; topHit = 0; topTotal = 0; lastPicked = emptyList(); shots = 0
         casts = 0; loggedKills = 0; roundNo = 0; dumps = 0
+        tapCount = 0; pendingKills = 0; pendingCasts = 0; voidedCasts = 0; voidedKills = 0; verifiedCasts = 0; discMiss = 0
         wallMiss = 0; wallMissNew = 0; outMiss = 0; prevMiss = emptySet(); prevMissBest = emptyMap()
         refLogged = false; assistOffLogged = false; assistOffBattle = false
     }
 
-    fun noteTap(kills: Int) { casts++; loggedKills += kills }
+    /** 0.45：点击发出时只记“待确认”；下一轮 onRound（或整盘全零 onZeroBoard）确认棋盘是预测的延续才计入记消。
+     *  0.44 以前在这里直接 casts++ / 加记消：结算屏上的空点、点空的点都被算成功（34 局记消 68 对结算 39）。 */
+    fun noteTap(kills: Int) { tapCount++; pendingCasts++; pendingKills += kills }
+
+    /** 0.45：整盘全零（这一波清完，或结算屏）：待确认的点击按已发生算。 */
+    fun onZeroBoard() { settlePending(true) }
+
+    private fun settlePending(live: Boolean) {
+        if (pendingCasts == 0) return
+        if (live) { casts += pendingCasts; loggedKills += pendingKills }
+        else {
+            voidedCasts += pendingCasts; voidedKills += pendingKills
+            AppLog.d("记忆", "点后棋盘对不上预测（结算屏 / 新一波 / 没点中），上次点击记消 $pendingKills 只作废，不计入")
+        }
+        pendingCasts = 0; pendingKills = 0
+    }
+
+    /** 0.45：这批怪是不是上一轮预测的延续（命中 ≥ 一半，和点后核实同一个门槛）。没有预测或本帧全空视为延续。 */
+    private fun continues(actual: List<Cell>): Boolean {
+        if (predicted.isEmpty() || actual.isEmpty()) return true
+        val gone = predicted.count { pc -> actual.none { it.type == pc.type && it.col == pc.col && it.row == pc.row } }
+        return (predicted.size - gone) * 2 >= predicted.size
+    }
+
+    /** Runner 选点前问：当前识别结果是不是上一轮预测的延续（不是就别信漏数、别代点）。 */
+    fun continuesPrediction(comps: List<Pair<String, Matcher.Comp>>): Boolean =
+        continues(comps.flatMap { (name, c) -> c.cells.ifEmpty { listOf(c.point) }.map { Cell(name, colOf(it.x), rowOfY(it.y)) } })
     fun noteOverride() { overrides++ }
 
     /** 每轮调用一次。comps=本轮所有伙（规则名→伙），pick=实际点的那伙（0.19 起是期限优先选出的）。
@@ -151,10 +188,13 @@ object BoardMemory {
         val actual = comps.flatMap { (name, c) ->
             c.cells.ifEmpty { listOf(c.point) }.map { Cell(name, colOf(it.x), rowOfY(it.y)) }
         }
-        // 0. 0.38 贴墙漏数日志：只读这一帧已抓到的像素，不改任何决策
+        // 0.45：本帧是不是上一轮预测的延续；先结算上次点击的记消，再做贴墙漏数
+        val live = continues(actual)
+        settlePending(live)
+        // 0. 0.38 贴墙漏数日志：只读这一帧已抓到的像素，不改任何决策（0.45：不连续帧不计入、不进代点）
         if (frame != null) {
             val nearCells = near.map { (_, n) -> Pair(colOf(n.x), rowOfY(n.y)) }.toSet()
-            auditWall(frame, actual.map { Pair(it.col, it.row) }.toSet(), nearCells, tpls)
+            auditWall(frame, actual.map { Pair(it.col, it.row) }.toSet(), nearCells, tpls, live)
         }
         var gone: List<Cell> = emptyList()
         // 1. 校验上一轮的预测
@@ -170,7 +210,7 @@ object BoardMemory {
             if (lastPicked.isNotEmpty() && hit * 2 >= predicted.size) {
                 val surv = lastPicked.count { p -> actual.any { it.type == p.type && it.col == p.col && it.row == p.row - 1 } }
                 val kv = lastPicked.size - surv + gone.size
-                verified += kv
+                verified += kv; verifiedCasts++
                 if (surv > 0 || kv != lastPicked.size) AppLog.w("记忆", "点后核实：记消 ${lastPicked.size} 只，核实消失 $kv 格（原位仍在 $surv 格，额外消失 ${gone.size} 格）")
             } else if (lastPicked.isNotEmpty()) {
                 AppLog.d("记忆", "点后核实作废：预测命中 $hit/${predicted.size} 太低，棋盘没按预期动")
@@ -218,11 +258,13 @@ object BoardMemory {
     const val HZ_CAP = 6
 
     /** 模拟：点掉 tapped 一伙后其余上移一格。返回（是否有怪越线，下轮最大一伙只数）。 */
-    fun simulateNext(actual: List<Cell>, tapped: Matcher.Comp, tappedName: String): Pair<Boolean, Double> {
+    fun simulateNext(actual: List<Cell>, tapped: Matcher.Comp, tappedName: String, ghosts: List<Cell> = emptyList()): Pair<Boolean, Double> {
         val tappedCells = tapped.cells.ifEmpty { listOf(tapped.point) }
             .map { Cell(tappedName, colOf(it.x), rowOfY(it.y)) }.toSet()
         val rest = actual.filter { it !in tappedCells }.map { Cell(it.type, it.col, it.row - 1) }
         if (rest.any { it.row < -1 }) return true to 0.0
+        // 0.45：漏数幽灵格（模板没认出但底色有怪）：任何一次施法都会让它们上移，已在 -1 排的会越线
+        if (ghosts.any { it.row - 1 < -1 }) return true to 0.0
         val groups = groupCells(rest)
         if (groups.isEmpty()) return false to 0.0
         return false to groups.maxOf { it.size }.toDouble()
@@ -230,11 +272,13 @@ object BoardMemory {
 
     /** 0.43 本地最优解用：模拟点掉 tapped 一伙后下一轮的情况。
      *  返回（是否有怪越线，下轮最大一伙只数，下轮 row<=0 的格数）。复用 simulateNext，不改它的语义。 */
-    fun simulateNextStats(all: List<Pair<String, Matcher.Comp>>, tapped: Matcher.Comp, tappedName: String): Triple<Boolean, Int, Int> {
+    fun simulateNextStats(all: List<Pair<String, Matcher.Comp>>, tapped: Matcher.Comp, tappedName: String,
+                          ghosts: List<Pair<String, Matcher.Comp>> = emptyList()): Triple<Boolean, Int, Int> {
         val actual = all.flatMap { (name, c) ->
             c.cells.ifEmpty { listOf(c.point) }.map { Cell(name, colOf(it.x), rowOfY(it.y)) }
         }
-        val (ends, next) = simulateNext(actual, tapped, tappedName)
+        val ghostCells = ghosts.flatMap { (name, c) -> c.cells.ifEmpty { listOf(c.point) }.map { Cell(name, colOf(it.x), rowOfY(it.y)) } }
+        val (ends, next) = simulateNext(actual, tapped, tappedName, ghostCells)
         val tappedCells = tapped.cells.ifEmpty { listOf(tapped.point) }
             .map { Cell(tappedName, colOf(it.x), rowOfY(it.y)) }.toSet()
         val threat = actual.filter { it !in tappedCells }.count { it.row - 1 <= 0 }
@@ -322,7 +366,7 @@ object BoardMemory {
     private fun colTxt(cols: List<Int>) = cols.joinToString("、") { "第 ${it + 1} 列" }
 
     /** 每轮一次：数第 -1/0/1 排里“底色有怪、模板却没检出”的格子（共 18 格），再看第 -2 排有没有怪底色。列号 1~6 从左到右，排号同棋盘。 */
-    private fun auditWall(frame: Bitmap, detected: Set<Pair<Int, Int>>, nearCells: Set<Pair<Int, Int>>, tpls: List<Pair<String, Matcher.Tpl>> = emptyList()) {
+    private fun auditWall(frame: Bitmap, detected: Set<Pair<Int, Int>>, nearCells: Set<Pair<Int, Int>>, tpls: List<Pair<String, Matcher.Tpl>> = emptyList(), live: Boolean = true) {
         try {
             if (frame.isRecycled) return
             if (!refLogged) {
@@ -348,6 +392,17 @@ object BoardMemory {
             for (r in -1..1) for (c in 0..5) {
                 if (Pair(c, r) in detected) continue
                 if (monsterBg(frame, c, r) == true) miss.add(Pair(c, r))
+            }
+            if (!live) {
+                // 0.45：不连续帧（结算屏压暗 / 新一波 / 点空）上底色判据不可靠：不计入 wallMiss、清空 prevMiss（不进代点）。
+                // 34 局：24 格·轮 = 12:06:37/38/41/43 四帧（5+5+9+5），此前每轮都是 0。
+                prevMiss = emptySet(); prevMissBest = emptyMap()
+                discMiss += miss.size
+                if (miss.isNotEmpty()) AppLog.w("记忆", "贴墙漏数（不连续帧，不计入、不代点）：${miss.size} 格——这一帧不是上一轮预测的延续，底色判据在这种帧上不可靠")
+                else AppLog.d("记忆", "贴墙漏数：0 格（不连续帧）")
+                val outD = (0..5).filter { beyondWallBg(frame, it) }
+                if (outD.isNotEmpty()) AppLog.w("记忆", "贴墙外漏数（不连续帧，不计入）：第 -2 排有 ${outD.size} 格怪底色（${colTxt(outD)}）")
+                return
             }
             // 新出现：上一轮同一只若在下一排（施法后上移一格），位置是 (c, r+1)，已在上一轮漏数里就不再算新的
             val newCnt = miss.count { (c, r) -> Pair(c, r + 1) !in prevMiss }
@@ -395,7 +450,7 @@ object BoardMemory {
      *  返回按“伙大→-1 格多→minRow 小→最左”排好序的伙。
      *  注意时序：Runner 在选点时调它，那时 prevMiss 还是上一轮的（本轮 auditWall 在 onRound 里才跑），
      *  所以第 0 排漏数正好对应现在的 -1 排；上一轮的 -1 排漏数现在已到 -2 排，撞了，没得点。 */
-    fun wallMissFallbackGroups(detected: Set<Pair<Int, Int>>): List<List<Pair<Int, Int>>> {
+    fun wallMissGroups(detected: Set<Pair<Int, Int>>): List<List<Pair<Int, Int>>> {
         val mapped = prevMiss.mapNotNull { (c, r) ->
             when (r) {
                 0 -> Pair(c, -1)
@@ -430,6 +485,18 @@ object BoardMemory {
                 .thenBy { g -> g.minOf { it.first } }
         )
     }
+
+    /** 0.45 代点只认“救命级”伙：含 -1 排格的伙。只在 0 排的漏数伙还能再等一施法，不值得抢这一次施法。 */
+    fun wallMissFallbackGroups(detected: Set<Pair<Int, Int>>): List<List<Pair<Int, Int>>> =
+        wallMissGroups(detected).filter { g -> g.any { it.second == -1 } }
+
+    /** 0.45 幽灵伙：把漏数伙变成只参与“期限余量/越线模拟”的伙（不是候选，不会被点）。
+     *  名字用「贴墙漏数」，和真怪类型不同，不会和真怪连片。 */
+    fun ghostComps(groups: List<List<Pair<Int, Int>>>): List<Pair<String, Matcher.Comp>> =
+        groups.map { g ->
+            val pts = g.map { cellCenter(it.first, it.second) }
+            "贴墙漏数" to Matcher.Comp(pts.minByOrNull { it.y }!!, g.size, 0.0, ys = pts.map { it.y }, cells = pts)
+        }
 
     /** 0.44：当前排 (col,row) 的漏数格在上一轮的小窗最佳分（见 prevMissBest）。
      *  当前 -1 排的怪上一轮在 0 排、当前 0 排的上一轮在 1 排；其余排没有漏数映射，取 0.0。 */
@@ -504,10 +571,11 @@ object BoardMemory {
 
     /** 一局结束时记一笔：没打过（0 施法 0 预测）就静默，只清预测。 */
     fun endBattle(ctx: Context) {
-        if (casts == 0 && predTotal == 0) {
+        if (tapCount == 0 && predTotal == 0) {
             predicted = emptyList()
             return
         }
+        settlePending(true)   // 0.45：最后一次点击没等到下一轮确认（战斗结束）：按已发生算
         battles++
         cumPredHit += predHit; cumPredTotal += predTotal; cumVanished += vanished; cumSuspect += suspect
         cumVerified += verified; cumTopHit += topHit; cumTopTotal += topTotal
@@ -516,10 +584,10 @@ object BoardMemory {
         cumWallMiss += wallMiss; cumWallMissNew += wallMissNew; cumOutMiss += outMiss
         save(ctx)
         val pred = if (predTotal > 0) "$predHit/$predTotal" else "—"
-        AppLog.i("记忆", "本局记忆：施法 $casts 次，记消 $loggedKills 只（${"%.2f".format(if (casts > 0) loggedKills.toDouble() / casts else 0.0)} 只/次）；" +
+        AppLog.i("记忆", "本局记忆：施法 $casts 次，记消 $loggedKills 只（${"%.2f".format(if (casts > 0) loggedKills.toDouble() / casts else 0.0)} 只/次；点击共 $tapCount 次，棋盘对不上而作废 $voidedCasts 次/$voidedKills 只）；" +
             "预测命中 $pred 格，新刷 $predNew 只；预测有而实测无 $vanished 格；近阈值漏数嫌疑 $suspect 格；" +
             wallMissText() + "期限优先改点 $overrides 次")
-        AppLog.i("记忆", "核实对账：记消 $loggedKills 只；点后核实清掉 $verified 只（逐施法对照前后棋盘，不依赖结算；两者差 ${verified - loggedKills}）；" +
+        AppLog.i("记忆", "核实对账：记消 $loggedKills 只；点后核实清掉 $verified 只（只覆盖 $verifiedCasts/$casts 次施法——预测命中不到一半的轮次不核实，所以不能和记消直接相减）；" +
             "上部(排≤4)预测命中 ${if (topTotal > 0) "$topHit/$topTotal" else "—"}；漏数嫌疑 $suspect 格；" + wallMissText().trimEnd('；'))
         val rate = if (cumPredTotal > 0) "%.1f%%".format(100.0 * cumPredHit / cumPredTotal) else "—"
         AppLog.i("记忆", "累计 $battles 局：预测命中率 $rate（上部 ${if (cumTopTotal > 0) "%.1f%%".format(100.0 * cumTopHit / cumTopTotal) else "—"}），期限优先改点 $cumOverrides 次，累计施法 $cumCasts 次 / 记消 $cumKills 只")
@@ -536,7 +604,7 @@ object BoardMemory {
     /** 本局贴墙漏数的一小段文字，供「本局记忆 / 核实对账」两行并排放在漏数嫌疑旁边 */
     private fun wallMissText(): String =
         if (assistOffBattle) "贴墙漏数 —（本局颜色辅助未开，未检测）；"
-        else "贴墙漏数 $wallMiss 格·轮（约 $wallMissNew 只）；贴墙外漏数 $outMiss 格；"
+        else "贴墙漏数 $wallMiss 格·轮（约 $wallMissNew 只）（不连续帧另有 $discMiss 格·轮，不计入）；贴墙外漏数 $outMiss 格；"
 
     /** 给界面看的累计摘要（主界面「查看记忆学习」用）；没打过任何一局返回 null。 */
     fun summaryText(ctx: Context): String? {

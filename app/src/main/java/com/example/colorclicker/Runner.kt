@@ -474,6 +474,7 @@ object Runner {
         val summary = "本轮比数量：${counts.joinToString(" / ")}"
         if (all.isEmpty()) {
             AppLog.d("匹配", "$summary → 都没找到$verified")
+            BoardMemory.onZeroBoard()   // 0.45：整盘全零（清完这一波 / 结算屏），待确认的点击按已发生算
             // 点过之后第一次整盘全零：要么这一波清完了，要么战斗结束。存一张整屏图当凭证（每局最多 3 张）
             if (!zeroShotDone && lastTapAt > 0 && zeroShots < 3) {
                 zeroShotDone = true; zeroShots++
@@ -511,7 +512,17 @@ object Runner {
             }
         }
         val compsAll = all.map { it.rule.name to it.comp }
-        val evs = all.map { Ev(it, BoardMemory.horizonAfterKill(compsAll, it.comp)) }
+        // 0.45：漏数幽灵伙。本帧不是上一轮预测的延续（结算屏 / 新一波）时一律不信漏数。
+        val detectedCells = all.flatMap { it.comp.cells.ifEmpty { listOf(it.comp.point) } }
+            .map { Pair(colOf(it.x), rowOf(it.y)) }.toSet()
+        val liveFrame = BoardMemory.continuesPrediction(compsAll)
+        // 已识别的伙里有贴墙（-1 排）的：它是确定存在的，漏数格（可能误报）不能拿它换；此时含 -1 排格的幽灵伙
+        // 不进求解器（否则人人 hz=-1，求解器会放弃这个确定的 -1 排伙去点别的），只让 0 排的幽灵伙进余量。
+        val detectedAtWall = all.any { BoardMemory.minRowOf(it.comp) <= -1 }
+        val ghostGroups = (if (liveFrame) BoardMemory.wallMissGroups(detectedCells) else emptyList())
+            .filter { g -> !detectedAtWall || g.none { it.second <= -1 } }
+        val ghosts = BoardMemory.ghostComps(ghostGroups)
+        val evs = all.map { Ev(it, BoardMemory.horizonAfterKill(compsAll + ghosts, it.comp)) }
         val ranked = evs.sortedWith(
             compareByDescending<Ev> { minOf(it.hz, HZ_CAP) }
                 .thenByDescending { it.cand.comp.size }
@@ -521,11 +532,11 @@ object Runner {
         // 0.43 本地最优解：删 AI 判点，改调 Solver.pick（纯本地、无网络）。
         // 期限规则首选仍算出来，只用来在日志里和求解器的选择对照。
         var pickEv = ranked.first()
-        val solverEval = Solver.pick(compsAll)
+        val solverEval = Solver.pick(compsAll, ghosts)
         if (solverEval != null) {
             val solverEv = evs.first { it.cand.comp === solverEval.comp }
             if (solverEv.cand.comp !== pickEv.cand.comp) {
-                val deadlineEval = Solver.eval(compsAll, pickEv.cand.rule.name, pickEv.cand.comp)
+                val deadlineEval = Solver.eval(compsAll, pickEv.cand.rule.name, pickEv.cand.comp, ghosts)
                 AppLog.i("最优解", "最优解改点：期限规则点「${pickEv.cand.rule.name.removePrefix("守卫-")}」${pickEv.cand.comp.size}只（两步${deadlineEval.twoStep}），改点「${solverEval.ruleName.removePrefix("守卫-")}」${solverEval.comp.size}只（两步${solverEval.twoStep}）")
                 pickEv = solverEv
             } else {
@@ -543,10 +554,15 @@ object Runner {
         var wallFallbackCell: Pair<Int, Int>? = null
         var wallFallbackGroup: List<Pair<Int, Int>> = emptyList()
         var origPickDesc = ""
-        val detectedCells = all.flatMap { it.comp.cells.ifEmpty { listOf(it.comp.point) } }
-            .map { Pair(colOf(it.x), rowOf(it.y)) }.toSet()
-        val fbGroups = BoardMemory.wallMissFallbackGroups(detectedCells)
-        if (fbGroups.isNotEmpty() && BoardMemory.minRowOf(pickEv.cand.comp) > -1) {
+        // 0.45：只认含 -1 排格的漏数伙（wallMissFallbackGroups）；不连续帧不代点。
+        // 守卫改为“已识别的伙里没有 -1 排的”（0.44 是 pick 不在 -1 排）：已识别伙在 -1 排时，漏数伙（-1 排）和它是两伙，
+        // 一次施法只能清一伙，点谁另一伙都越线——保留“确定存在”的已识别伙，不拿它换一个可能是误报的漏数格。
+        // 注意 0.44 的 pick 守卫在有幽灵伙时会失效（人人 hz=-1，求解器不一定点 -1 排伙），所以改成直接看棋盘。
+        val fbGroups = if (liveFrame) BoardMemory.wallMissFallbackGroups(detectedCells) else emptyList()
+        if (fbGroups.isNotEmpty() && detectedAtWall) {
+            AppLog.w("匹配", "贴墙漏数伙 ${fbGroups.size} 个含 -1 排格，但已识别的伙里也有 -1 排的：一次只能清一伙，点谁都有一伙越线，保留已识别的伙（漏数格：${fbGroups.first().joinToString("、") { "第 ${it.first + 1} 列第 ${it.second} 排" }}）")
+        }
+        if (fbGroups.isNotEmpty() && !detectedAtWall) {
             origPickDesc = "${pickEv.cand.rule.name.removePrefix("守卫-")}${pickEv.cand.comp.size}只（第${BoardMemory.minRowOf(pickEv.cand.comp)}排，${hzText(pickEv.hz)}）"
             val group = fbGroups.first()
             wallFallbackGroup = group

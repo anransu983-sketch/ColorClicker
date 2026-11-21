@@ -25,18 +25,20 @@ object Solver {
     )
 
     /** 给一伙打分：余量 + 模拟下一步（复用 BoardMemory.simulateNextStats，不另写分组逻辑）。 */
-    fun eval(compsAll: List<Pair<String, Matcher.Comp>>, ruleName: String, comp: Matcher.Comp): Eval {
-        val hz = BoardMemory.horizonAfterKill(compsAll, comp)
-        val (ends, nextMax, _) = BoardMemory.simulateNextStats(compsAll, comp, ruleName)
+    fun eval(compsAll: List<Pair<String, Matcher.Comp>>, ruleName: String, comp: Matcher.Comp,
+             ghosts: List<Pair<String, Matcher.Comp>> = emptyList()): Eval {
+        // 0.45：ghosts = 贴墙漏数伙（模板没认出、底色有怪）。只进期限余量和越线模拟，不是候选、不进只数。
+        val hz = BoardMemory.horizonAfterKill(compsAll + ghosts, comp)
+        val (ends, nextMax, _) = BoardMemory.simulateNextStats(compsAll, comp, ruleName, ghosts)
         // ends 时 nextMax 已是 0，两步值就是本轮只数。
         return Eval(ruleName, comp, hz, comp.size + nextMax, nextMax, ends)
     }
 
     /** 选出本轮该点的一伙；空棋盘返回 null。hz == -1（点完即撞墙）的候选一律排除，
      *  除非全部候选都是 -1（那局反正要结束，选只数最大的）。 */
-    fun pick(compsAll: List<Pair<String, Matcher.Comp>>): Eval? {
+    fun pick(compsAll: List<Pair<String, Matcher.Comp>>, ghosts: List<Pair<String, Matcher.Comp>> = emptyList()): Eval? {
         if (compsAll.isEmpty()) return null
-        val evals = compsAll.map { (name, comp) -> eval(compsAll, name, comp) }
+        val evals = compsAll.map { (name, comp) -> eval(compsAll, name, comp, ghosts) }
         val pool = evals.filter { it.hz != -1 }.ifEmpty { evals }
         return pool.sortedWith(
             compareByDescending<Eval> { minOf(it.hz, BoardMemory.HZ_CAP) }
