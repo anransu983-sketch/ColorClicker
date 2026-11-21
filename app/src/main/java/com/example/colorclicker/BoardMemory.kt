@@ -87,6 +87,10 @@ object BoardMemory {
     private var voidedKills = 0
     private var verifiedCasts = 0   // 0.45：点后核实真正覆盖的施法数（核实只在预测命中 ≥ 一半的轮次做）
     private var discMiss = 0        // 0.45：不连续帧上的漏数格·轮（不计入 wallMiss）
+    private var pickRoundHit = -1   // 0.48：选点那一轮自己的预测校验命中 / 预测只数（-1 = 那轮没校验），总落空诊断用
+    private var pickRoundTotal = 0
+    private var tapScanMs = -1L      // 0.48：上次点击的“选点→点击”耗时 / 距上上次点击多久（-1 = 未知）
+    private var tapSincePrevMs = -1L
     private var prevActual: List<Cell> = emptyList()   // 0.47：上一轮 onRound 看到的全部怪（没上移的原排位置），给 unshiftedMatch 用
     private var lastVeil = 0        // 0.45b：上一轮整帧盖层判定（0 无 / 1 发白 / 2 压暗），只用来让日志不刷屏
     private var roundNo = 0
@@ -152,6 +156,14 @@ object BoardMemory {
     /** 0.45：点击发出时只记“待确认”；下一轮 onRound（或整盘全零 onZeroBoard）确认棋盘是预测的延续才计入记消。
      *  0.44 以前在这里直接 casts++ / 加记消：结算屏上的空点、点空的点都被算成功（34 局记消 68 对结算 39）。 */
     fun noteTap(kills: Int) { tapCount++; pendingCasts++; pendingKills += kills }
+
+    /** 0.48：Runner 在点击发出后报告这次点击的时间信息，给下一轮“总落空诊断”用。 */
+    fun noteTapTiming(scanToTapMs: Long, sincePrevTapMs: Long) { tapScanMs = scanToTapMs; tapSincePrevMs = sincePrevTapMs }
+
+    /** 0.48：点前复核取消了这次点击。onRound 已按“点了”记下 lastPicked / predicted，这里撤销，
+     *  否则下一轮的预测校验、点后核实、漏数可信度（continuesPrediction）都会被一次没发生的点击污染。
+     *  没有预测时 onRound 跳过校验、continues() 视为延续；noteTap 没调用过，pending 不受影响。 */
+    fun cancelPick() { lastPicked = emptyList(); predicted = emptyList() }
 
     /** 0.45：整盘全零（这一波清完，或结算屏）：待确认的点击按已发生算。 */
     fun onZeroBoard() { settlePending(true) }
@@ -260,10 +272,12 @@ object BoardMemory {
             auditWall(frame, actual.map { Pair(it.col, it.row) }.toSet(), nearCells, tpls, live)
         }
         var gone: List<Cell> = emptyList()
+        var hitNow = -1; var totalNow = 0
         // 1. 校验上一轮的预测
         if (predicted.isNotEmpty() && actual.isNotEmpty()) {
             gone = predicted.filter { pc -> actual.none { it.type == pc.type && it.col == pc.col && it.row == pc.row } }
             val hit = predicted.size - gone.size
+            hitNow = hit; totalNow = predicted.size
             val fresh = actual.count { a -> predicted.none { it.type == a.type && it.col == a.col && it.row == a.row } }
             predHit += hit; predTotal += predicted.size; predNew += fresh; vanished += gone.size
             val top = predicted.filter { it.row <= 4 }
@@ -275,6 +289,12 @@ object BoardMemory {
                 val kv = lastPicked.size - surv + gone.size
                 verified += kv; verifiedCasts++
                 if (surv > 0 || kv != lastPicked.size) AppLog.w("记忆", "点后核实：记消 ${lastPicked.size} 只，核实消失 $kv 格（原位仍在 $surv 格，额外消失 ${gone.size} 格）")
+                // 0.48 总落空诊断（整伙原位仍在、一格没清）：区分“选点帧本身就是半截帧（0.47 闸门漏判）”和“选点帧已上移完、点击落下时才开始动”。
+                // 选点那轮预测命中 ≈ 0（新刷 ≈ 预测只数）= 前者；接近满 = 后者。再看选点→点击耗时、距上次点击多久。
+                if (surv == lastPicked.size && gone.isEmpty()) {
+                    val pr = if (pickRoundHit < 0) "没校验" else "$pickRoundHit/$pickRoundTotal"
+                    AppLog.w("记忆", "总落空诊断：选点那轮预测命中 $pr（≈0=选点帧是半截帧、闸门漏判；接近满=选点帧已上移完），选点→点击 ${if (tapScanMs < 0) "—" else "${tapScanMs}ms"}，距上次点击 ${if (tapSincePrevMs < 0) "—" else "${tapSincePrevMs}ms"}")
+                }
             } else if (lastPicked.isNotEmpty()) {
                 AppLog.d("记忆", "点后核实作废：预测命中 $hit/${predicted.size} 太低，棋盘没按预期动")
             }
@@ -305,6 +325,7 @@ object BoardMemory {
             s.n++; s.sum += c.score; if (c.score < s.min) s.min = c.score; if (c.score > s.max) s.max = c.score
         }
         prevActual = actual
+        pickRoundHit = hitNow; pickRoundTotal = totalNow
         // 4. 预测下一轮：去掉点的那伙，其余上移一行；row < -1 的是撞墙的，不进预测
         lastPicked = if (pick != null) pick.cells.ifEmpty { listOf(pick.point) }.map { Cell(pickRule, colOf(it.x), rowOfY(it.y)) } else emptyList()
         predicted = if (pick != null) {
@@ -429,6 +450,10 @@ object BoardMemory {
 
     private fun colTxt(cols: List<Int>) = cols.joinToString("、") { "第 ${it + 1} 列" }
 
+    /** 0.48：判“颜色辅助没开”至少要抽到这么多个已检出的格子。36 局 13:50:46 盘上只剩 2 只，抽 2 个 0 个有染就判“未开”并锁了整局，
+     *  可后面贴墙漏数照常出了（辅助其实开着）：2 个格子证明不了什么。不够数 = 不下结论，照常往下做漏数检测（和抽到 0/1 个时一样）。 */
+    private const val ASSIST_MIN_SAMPLE = 6
+
     /** 每轮一次：数第 -1/0/1 排里“底色有怪、模板却没检出”的格子（共 18 格），再看第 -2 排有没有怪底色。列号 1~6 从左到右，排号同棋盘。 */
     private fun auditWall(frame: Bitmap, detected: Set<Pair<Int, Int>>, nearCells: Set<Pair<Int, Int>>, tpls: List<Pair<String, Matcher.Tpl>> = emptyList(), live: Boolean = true) {
         try {
@@ -444,13 +469,18 @@ object BoardMemory {
                 val t = monsterBg(frame, c, r) ?: continue
                 sampled++; if (t) tinted++
             }
-            if (sampled >= 2 && tinted * 4 < sampled) {
+            if (sampled >= ASSIST_MIN_SAMPLE && tinted * 4 < sampled) {
                 assistOffBattle = true
                 if (!assistOffLogged) {
                     assistOffLogged = true
                     AppLog.w("记忆", "颜色辅助未开（抽查 $sampled 个检出的格子，只有 $tinted 个底色有染），贴墙漏数检测跳过")
                 }
                 return
+            }
+            // 0.48：够数的一轮抽查通过 = 辅助是开的；之前若因（够数的）抽查判过“未开”，这里改判回来，别让整局锁死在“未开”
+            if (sampled >= ASSIST_MIN_SAMPLE && assistOffBattle) {
+                assistOffBattle = false; assistOffLogged = false
+                AppLog.i("记忆", "颜色辅助抽查恢复正常（抽查 $sampled 个，$tinted 个底色有染），改判为已开，继续做贴墙漏数检测")
             }
             val miss = ArrayList<Pair<Int, Int>>()
             for (r in -1..1) for (c in 0..5) {

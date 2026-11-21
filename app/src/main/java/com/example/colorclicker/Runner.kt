@@ -60,6 +60,18 @@ object Runner {
     private var staleRetries = 0
     @Volatile private var staleFlag = false
     @Volatile private var slidingFlag = false
+    /** 0.48 点前复核：选点后、发点击前再取一帧，只比“被点那伙周围一圈”和选点帧的差异；变化占比 > SETTLE_FRAC（沿用点后稳定的阈值，不新增阈值）
+     *  = 盘面已经在动，取消这次点击、重扫。连续最多取消 PRETAP_MAX_ABORT 次，再变也放行（防怪物待机动画误报把轮次卡死）。
+     *  PRETAP_RECHECK=false 可整段关掉。 */
+    private const val PRETAP_RECHECK = true
+    private const val PRETAP_MARGIN = 180
+    private const val PRETAP_MAX_ABORT = 1
+    private var preTapAborts = 0
+    /** 0.48：选点完成的时刻，给总落空诊断算“选点→点击”耗时 */
+    private var pickDecidedAt = 0L
+    /** 0.48：settle 等满 SETTLE_TRIES 帧画面相对点前那帧一点没变 = 画面冻住（战斗已结束 / 点击没被游戏接收）。
+     *  半截帧里被点的伙已消、画面一定有变，所以冻住的帧不是半截帧，上移等待跳过（0.47 实测终局白等 ~12 秒） */
+    @Volatile private var settleUnchanged = false
 
     // ───────── 0.23 复盘（死前回放）─────────
     private val recentRounds = java.util.ArrayDeque<String>()
@@ -70,7 +82,7 @@ object Runner {
     fun isRunning() = job?.isActive == true
 
     /** 扎堆比数量的结果：规则、点、该规则的相似度、能消只数 */
-    private data class ClusterPick(val rule: Rule, val point: Point, val score: Double, val count: Int)
+    private data class ClusterPick(val rule: Rule, val point: Point, val score: Double, val count: Int, val cells: List<Point> = emptyList())
 
     /** 棋盘第 0 排（贴墙）中心 y 与行距。第 0 排的怪下一次施法后到第 -1 排（y1271）仍可点，再下一次才撞墙 */
     private const val ROW0_Y = 1511
@@ -174,6 +186,39 @@ object Runner {
         return n.toDouble() / a.size
     }
 
+    /** 0.48：取 b 里 [x0,x1)×[y0,y1) 的下采样像素（宽高各 1/8，至少 1），点前复核比对用；出错返回空数组（changedFrac 对空数组返回 0 = 不拦） */
+    private fun regionSig(b: Bitmap, x0: Int, y0: Int, x1: Int, y1: Int): IntArray = try {
+        val w = (x1 - x0).coerceAtLeast(1); val h = (y1 - y0).coerceAtLeast(1)
+        val sub = Bitmap.createBitmap(b, x0, y0, w, h)
+        val sm = Bitmap.createScaledBitmap(sub, (w / 8).coerceAtLeast(1), (h / 8).coerceAtLeast(1), false)
+        val px = IntArray(sm.width * sm.height)
+        sm.getPixels(px, 0, sm.width, 0, 0, sm.width, sm.height)
+        if (sm !== sub) sm.recycle()
+        if (sub !== b) sub.recycle()
+        px
+    } catch (e: Exception) { IntArray(0) }
+
+    /** 0.48 点前复核：先从选点帧取被点那伙周围（±PRETAP_MARGIN）的签名，再取一帧新的、同一块区域比一次。
+     *  返回（变化占比, 耗时 ms）；没有新帧（grab 复用同一张）/ 尺寸不一致 / 出错返回 null（不拦）。
+     *  顺序是先算选点帧签名、后 grab：不假设 grab 会不会回收上一张。 */
+    private fun preTapCheck(scan: Bitmap, cells: List<Point>): Pair<Double, Long>? {
+        if (cells.isEmpty()) return null
+        val t0 = System.nanoTime()
+        return try {
+            if (scan.isRecycled) return null
+            val x0 = (cells.minOf { it.x } - PRETAP_MARGIN).coerceIn(0, scan.width - 1)
+            val x1 = (cells.maxOf { it.x } + PRETAP_MARGIN).coerceIn(x0 + 1, scan.width)
+            val y0 = (cells.minOf { it.y } - PRETAP_MARGIN).coerceIn(0, scan.height - 1)
+            val y1 = (cells.maxOf { it.y } + PRETAP_MARGIN).coerceIn(y0 + 1, scan.height)
+            val a = regionSig(scan, x0, y0, x1, y1)
+            val fresh = ScreenGrabber.grab() ?: return null
+            if (fresh === scan || fresh.isRecycled || fresh.width != scan.width || fresh.height != scan.height) return null
+            val b = regionSig(fresh, x0, y0, x1, y1)
+            if (a.isEmpty() || a.size != b.size) return null
+            Pair(changedFrac(a, b), (System.nanoTime() - t0) / 1_000_000)
+        } catch (e: Exception) { null }
+    }
+
     private suspend fun settle(first: Bitmap): Bitmap {
         var cur = first
         var tries = 0
@@ -190,6 +235,7 @@ object Runner {
             }
             if (tries >= SETTLE_TRIES && changedFrac(ref, sig(cur)) <= SETTLE_FRAC) {
                 AppLog.d("匹配", "点后等画面：${SETTLE_TRIES} 帧都没变（帧复用或战斗已结束），继续用当前帧")
+                settleUnchanged = true
             }
         } else {
             var prev = sig(cur)
@@ -217,6 +263,7 @@ object Runner {
             lastSig = ""; sameRounds = 0; noEffectStop = false; lastTapAt = 0L
             lastTapRuleId = null; lastTapPoint = null; lastTapBoardSig = ""; pendingBoardSig = ""; repeatSkips = 0; lastTapFrameSig = null
             slideRetries = 0; slidingFlag = false; staleRetries = 0; staleFlag = false; zeroShotDone = false; zeroShots = 0; clearReplay()
+            preTapAborts = 0; pickDecidedAt = 0L; settleUnchanged = false
             BoardMemory.beginBattle(ctx)
             var frameLogged = false
             var nullLogged = false
@@ -237,6 +284,7 @@ object Runner {
                     AppLog.i("截图", "首帧画面 ${frame.width}x${frame.height}")
                     frameLogged = true
                 }
+                settleUnchanged = false
                 if (lastTapAt > 0 && System.currentTimeMillis() - lastTapAt < 4000) frame = settle(frame)
                 var acted = false
                 // 1. 普通规则按顺序，先命中先点（保持老行为）
@@ -260,7 +308,22 @@ object Runner {
                     if (slidingFlag) { slidingFlag = false; delay(SLIDE_RETRY_MS); continue }
                     if (staleFlag) { staleFlag = false; delay(STALE_RETRY_MS); continue }
                     if (best != null) {
-                        lastTapFrameSig = sig(frame)
+                        val refSig = sig(frame)
+                        // 0.48 点前复核：选点帧之后画面又动了（扫→点这一小段里开始上移）就别点，重扫。
+                        val chk = if (PRETAP_RECHECK) preTapCheck(frame, best.cells) else null
+                        if (chk != null && chk.first > SETTLE_FRAC) {
+                            if (preTapAborts < PRETAP_MAX_ABORT) {
+                                preTapAborts++
+                                AppLog.w("点击", "点前复核：被点那伙周围画面又变了 ${"%.1f".format(chk.first * 100)}%（复核 ${chk.second}ms），盘面在动，取消这次点击 (${best.point.x},${best.point.y})，重扫")
+                                BoardMemory.cancelPick()
+                                delay(SLIDE_RETRY_MS); continue
+                            }
+                            AppLog.w("点击", "点前复核：画面仍在变 ${"%.1f".format(chk.first * 100)}%，已连续取消 $preTapAborts 次，放行")
+                        } else if (chk != null && preTapAborts > 0) {
+                            AppLog.d("点击", "点前复核：重扫后画面稳定（变化 ${"%.1f".format(chk.first * 100)}%，复核 ${chk.second}ms），放行")
+                        }
+                        preTapAborts = 0
+                        lastTapFrameSig = refSig
                         val n = doTap(best.rule, best.point, maxClicks, clicks, best.score, best.count)
                         if (n < 0) { stop(); return@launch }
                         clicks = n
@@ -293,6 +356,8 @@ object Runner {
         logHit(r, p, score, cluster)
         val tx = p.x + r.offsetX
         val ty = p.y + r.offsetY
+        val prevTapAt = lastTapAt
+        val tapStart = System.currentTimeMillis()
         val ok = ClickService.tap(tx, ty)
         if (!ok) {
             AppLog.e("点击", "规则「${r.name}」点击 ($tx,$ty) 失败：无障碍手势被拒或服务断开，停止运行")
@@ -308,6 +373,8 @@ object Runner {
             lastTapRuleId = null; lastTapPoint = null; lastTapBoardSig = ""
         }
         BoardMemory.noteTap(cluster ?: 1)
+        // 0.48：给“点后整伙落空”诊断：选点→点击耗时、距上次点击多久（只扎堆点击有选点时刻）
+        if (cluster != null && pickDecidedAt > 0) BoardMemory.noteTapTiming(tapStart - pickDecidedAt, if (prevTapAt > 0) pickDecidedAt - prevTapAt else -1L)
         val wait = (r.delayMs * Random.nextDouble(0.8, 1.2)).toLong()
         val n = clicks + 1
         AppLog.d("点击", "规则「${r.name}」点击 ($tx,$ty) 已发出，点击后等待 ${wait}ms" + if (maxClicks > 0) "（第 $n/$maxClicks 次）" else "")
@@ -503,7 +570,12 @@ object Runner {
         // 0.47 半截帧闸门：刚点过，这帧里被点的伙已消、其余怪还在原排、也没有新怪 = 消除动画播完而整盘还没上移。
         // 在这帧上选点，点击落下时盘面刚好上移，会点到下面一排的邻居或空地（35 局 15 次作废 + 一半的点没清掉目标）。
         // 等上移完成再扫；不进签名/预测/选点，也不作废上次点击的记消。
-        val stale = if (staleRetries < STALE_MAX_RETRY) BoardMemory.unshiftedMatch(all.map { it.rule.name to it.comp }) else null
+        val staleRaw = if (staleRetries < STALE_MAX_RETRY) BoardMemory.unshiftedMatch(all.map { it.rule.name to it.comp }) else null
+        // 0.48：点后等满 SETTLE_TRIES 帧画面一点没变 = 冻住（终局 / 点击没被接收）。半截帧里被点的伙已消，画面一定有变，所以这不是半截帧，不等上移。
+        val stale = if (settleUnchanged) null else staleRaw
+        if (staleRaw != null && stale == null && staleRetries == 0) {
+            AppLog.d("匹配", "点后 ${SETTLE_TRIES} 帧画面都没变：整盘冻住，不是半截帧（原排吻合 ${staleRaw.first}/${staleRaw.second}），跳过上移等待")
+        }
         if (stale != null) {
             staleRetries++
             staleFlag = true
@@ -629,7 +701,8 @@ object Runner {
         val diagTpls = clusterRules.mapIndexedNotNull { i, r -> tpls[i]?.let { r.name to it } }
         BoardMemory.onRound(compsAll, pick.comp, pick.rule.name, frame, near, diagTpls)?.let { AppLog.d("记忆", it) }
         pendingBoardSig = roundSig
-        return ClusterPick(pick.rule, pick.comp.point, pick.comp.score, pick.comp.size)
+        pickDecidedAt = System.currentTimeMillis()
+        return ClusterPick(pick.rule, pick.comp.point, pick.comp.score, pick.comp.size, pick.comp.cells.ifEmpty { listOf(pick.comp.point) })
     }
 
     private fun logHit(r: Rule, p: Point, score: Double? = null, cluster: Int? = null) {
