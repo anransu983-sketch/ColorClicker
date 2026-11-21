@@ -115,6 +115,11 @@ object BoardMemory {
     private var wallMissNew = 0       // 本局：其中“新出现”的格数（上一轮上移一格的位置不在漏数里）≈ 漏掉的怪数
     private var outMiss = 0           // 本局：第 -2 排出现怪底色的格数
     private var prevMiss: Set<Pair<Int, Int>> = emptySet()
+    /** 0.44：上一轮漏数格的小窗最佳分（Matcher.bestScoresAtCell 的最高分，即日志“逐格最佳分”里的第一名），
+     *  由 auditWall 的逐格诊断顺手记下，供下一轮代点选落点用——决策时不再重算（bestScoresAtCell 每次调用
+     *  都要整帧转 Mat + 逐模板匹配，重算会把 0–8ms 的决策拖慢几百毫秒）；分数是同一只怪上一轮的实测分
+     *  （上一轮 (c,0) 的怪就是现在 (c,-1) 的怪）。没覆盖到的格（诊断只算前 6 格）查不到，取 0.0。 */
+    private var prevMissBest: Map<Pair<Int, Int>, Double> = emptyMap()
     private var cumWallMiss = 0
     private var cumWallMissNew = 0
     private var cumOutMiss = 0
@@ -125,7 +130,7 @@ object BoardMemory {
         predicted = emptyList(); predTotal = 0; predHit = 0; predNew = 0
         vanished = 0; suspect = 0; overrides = 0; verified = 0; topHit = 0; topTotal = 0; lastPicked = emptyList(); shots = 0
         casts = 0; loggedKills = 0; roundNo = 0; dumps = 0
-        wallMiss = 0; wallMissNew = 0; outMiss = 0; prevMiss = emptySet()
+        wallMiss = 0; wallMissNew = 0; outMiss = 0; prevMiss = emptySet(); prevMissBest = emptyMap()
         refLogged = false; assistOffLogged = false; assistOffBattle = false
     }
 
@@ -349,6 +354,7 @@ object BoardMemory {
             prevMiss = miss.toSet()
             wallMiss += miss.size; wallMissNew += newCnt
             if (miss.isEmpty()) {
+                prevMissBest = emptyMap()
                 AppLog.d("记忆", "贴墙漏数：0 格")
             } else {
                 // 0.40：每个漏数格逐规则算小窗最佳分（原生分辨率）。已算好的匹配响应只留 ≥阈值和近阈值点，
@@ -360,6 +366,8 @@ object BoardMemory {
                             .sortedByDescending { it.second }.take(2)
                     }
                 } else emptyMap()
+                // 0.44：把每格的最佳分（第一名）存下来，下一轮代点选落点用（见 missBestScore）。
+                prevMissBest = diag.mapValues { (_, top) -> top.maxOfOrNull { it.second } ?: 0.0 }
                 val diagTxt = if (diag.isEmpty()) "" else "；逐格最佳分：" + diag.entries.joinToString("；") { (cell, top) ->
                     "第 ${cell.first + 1} 列第 ${cell.second} 排→" + if (top.isEmpty()) "无响应" else top.joinToString("/") { "${it.first.removePrefix("守卫-")}${"%.3f".format(it.second)}" }
                 }
@@ -380,13 +388,59 @@ object BoardMemory {
     /** 格子中心（原生坐标）。BoardMemory 自己的几何：第一列中心 117、第一排中心 1511、格距 240。 */
     fun cellCenter(col: Int, row: Int) = Point(COL0_X + col * STEP, ROW0_Y + row * STEP)
 
-    /** 0.39 贴墙漏数代点：上一轮漏数的第 0 排格子，这一轮已上移到 -1 排（再不点，下一施法就撞墙）。
-     *  传进本轮模板已检出的格子，去掉已检出的——剩下的就是“底色有怪、模板认不出、马上撞墙”的格子。
+    /** 0.44 贴墙漏数代点（按伙）：上一轮漏数映射到当前排——第 0 排→-1 排（救命级）、
+     *  第 1 排→0 排（次级）、第 -1 排→-2 排（已死，丢弃），去掉本轮模板已检出的格子，
+     *  再按上下左右相邻成伙（不按模板类型分伙——点下去游戏清的是该格真实怪物的同种连通伙；
+     *  墙区怪 bestScores 只有 0.38–0.47 且常平手，拿它分类反而误事）。
+     *  返回按“伙大→-1 格多→minRow 小→最左”排好序的伙。
      *  注意时序：Runner 在选点时调它，那时 prevMiss 还是上一轮的（本轮 auditWall 在 onRound 里才跑），
      *  所以第 0 排漏数正好对应现在的 -1 排；上一轮的 -1 排漏数现在已到 -2 排，撞了，没得点。 */
-    fun wallMissFallback(detected: Set<Pair<Int, Int>>): List<Pair<Int, Int>> =
-        prevMiss.filter { it.second == 0 }.map { Pair(it.first, -1) }
-            .filter { it !in detected }
+    fun wallMissFallbackGroups(detected: Set<Pair<Int, Int>>): List<List<Pair<Int, Int>>> {
+        val mapped = prevMiss.mapNotNull { (c, r) ->
+            when (r) {
+                0 -> Pair(c, -1)
+                1 -> Pair(c, 0)
+                else -> null
+            }
+        }.filter { it !in detected }
+        if (mapped.isEmpty()) return emptyList()
+        val left = mapped.toMutableList()
+        val groups = ArrayList<List<Pair<Int, Int>>>()
+        while (left.isNotEmpty()) {
+            val seed = left.removeAt(0)
+            val group = ArrayList<Pair<Int, Int>>()
+            val stack = ArrayDeque<Pair<Int, Int>>()
+            stack.add(seed); group.add(seed)
+            while (stack.isNotEmpty()) {
+                val cur = stack.removeLast()
+                val it = left.iterator()
+                while (it.hasNext()) {
+                    val o = it.next()
+                    if (abs(o.first - cur.first) + abs(o.second - cur.second) == 1) {
+                        it.remove(); stack.add(o); group.add(o)
+                    }
+                }
+            }
+            groups.add(group)
+        }
+        return groups.sortedWith(
+            compareByDescending<List<Pair<Int, Int>>> { it.size }
+                .thenByDescending { g -> g.count { it.second == -1 } }
+                .thenBy { g -> g.minOf { it.second } }
+                .thenBy { g -> g.minOf { it.first } }
+        )
+    }
+
+    /** 0.44：当前排 (col,row) 的漏数格在上一轮的小窗最佳分（见 prevMissBest）。
+     *  当前 -1 排的怪上一轮在 0 排、当前 0 排的上一轮在 1 排；其余排没有漏数映射，取 0.0。 */
+    fun missBestScore(col: Int, row: Int): Double {
+        val prev = when (row) {
+            -1 -> Pair(col, 0)
+            0 -> Pair(col, 1)
+            else -> return 0.0
+        }
+        return prevMissBest[prev] ?: 0.0
+    }
 
     /** Runner 在“点过之后第一次整盘全零”时调用（每局最多 3 次）：① 学空地参考色（角的色度大多贴近默认值才采信，压暗的结算屏也适用）；
      *  ② 看第 -2 排有没有怪底色。整盘全零的帧可能是结算屏（压暗、模板全认不出），所以这里不数第 -1~1 排，免得把压暗误报成漏数。 */

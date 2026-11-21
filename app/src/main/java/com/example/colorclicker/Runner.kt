@@ -532,20 +532,31 @@ object Runner {
                 AppLog.d("最优解", "最优解和期限规则一致，点「${pickEv.cand.rule.name}」${pickEv.cand.comp.size}只，两步值${solverEval.twoStep}")
             }
         }
-        // 0.39 贴墙漏数代点：上一轮漏数的第 0 排怪现在已到 -1 排，下一施法就撞墙；
-        // 模板认不出它、底色却有怪，坐标是清楚的。期限规则点的不是 -1 排时改点它——
-        // 不点它就等撞墙。
+        // 0.44 贴墙漏数代点（按伙）：上一轮漏数映射到当前排后按上下左右相邻成伙，选最大的一伙；
+        // 落点取伙内 -1 排最佳分最高的那格（最佳分是 auditWall 逐格诊断的实测分，见 missBestScore；
+        // -1 排优先于分数：墙区怪最佳分只有 0.38–0.47，落在空盘噪声带里还常平手，分差说明不了
+        // 什么，而 -1 排不点下一施法就撞墙；没分时退回 -1 排最左格）。
+        // 触发条件不变：漏数伙非空、且求解器 pick 不在 -1 排时才代点。
+        // Comp size 仍记 1：实际清掉几只取决于该格真怪的同种连通伙，伙格数 ≠ 清掉数；
+        // 记成伙格数会像 33 局那样把记消吹高（记消 50 对结算 29）。伙格数只写进日志。
         var wallFallback: Point? = null
-        var wallFallbackCol = -1
+        var wallFallbackCell: Pair<Int, Int>? = null
+        var wallFallbackGroup: List<Pair<Int, Int>> = emptyList()
         var origPickDesc = ""
         val detectedCells = all.flatMap { it.comp.cells.ifEmpty { listOf(it.comp.point) } }
             .map { Pair(colOf(it.x), rowOf(it.y)) }.toSet()
-        val fb = BoardMemory.wallMissFallback(detectedCells)
-        if (fb.isNotEmpty() && BoardMemory.minRowOf(pickEv.cand.comp) > -1) {
+        val fbGroups = BoardMemory.wallMissFallbackGroups(detectedCells)
+        if (fbGroups.isNotEmpty() && BoardMemory.minRowOf(pickEv.cand.comp) > -1) {
             origPickDesc = "${pickEv.cand.rule.name.removePrefix("守卫-")}${pickEv.cand.comp.size}只（第${BoardMemory.minRowOf(pickEv.cand.comp)}排，${hzText(pickEv.hz)}）"
-            val (fc, _) = fb.minByOrNull { it.first }!!
-            wallFallbackCol = fc
-            wallFallback = BoardMemory.cellCenter(fc, -1)
+            val group = fbGroups.first()
+            wallFallbackGroup = group
+            val landing = group.sortedWith(
+                compareBy<Pair<Int, Int>> { it.second }
+                    .thenByDescending { BoardMemory.missBestScore(it.first, it.second) }
+                    .thenBy { it.first }
+            ).first()
+            wallFallbackCell = landing
+            wallFallback = BoardMemory.cellCenter(landing.first, landing.second)
             val cell = wallFallback!!
             pickEv = Ev(Cand(WALL_FALLBACK_RULE, Matcher.Comp(cell, 1, 0.0, ys = listOf(cell.y), cells = listOf(cell))), pickEv.hz)
         }
@@ -570,7 +581,7 @@ object Runner {
             repeatSkips = 0
         }
         if (wallFallback != null) {
-            AppLog.w("匹配", "$summary → 贴墙漏数代点：第 ${wallFallbackCol + 1} 列第 -1 排（${wallFallback!!.x},${wallFallback!!.y}）（模板没认出、底色有怪，马上撞墙；期限规则本来点「$origPickDesc」）候选前三：$top3")
+            AppLog.w("匹配", "$summary → 贴墙漏数代点：第 ${wallFallbackCell!!.first + 1} 列第 ${wallFallbackCell!!.second} 排（${wallFallback!!.x},${wallFallback!!.y}），同伙漏数 ${wallFallbackGroup.size} 格（${wallFallbackGroup.joinToString("、") { "第 ${it.first + 1} 列第 ${it.second} 排" }}）（模板没认出、底色有怪；期限规则本来点「$origPickDesc」）候选前三：$top3")
         } else {
             AppLog.d("匹配", "$summary → 点「${pick.rule.name}」（连成 ${pick.comp.size} 只，其中贴墙 $wallCnt 只，y${pick.comp.point.y}，相似度 ${"%.3f".format(pick.comp.score)}，${hzText(pickEv.hz)}）候选前三：$top3")
         }
