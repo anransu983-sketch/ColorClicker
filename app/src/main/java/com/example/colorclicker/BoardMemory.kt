@@ -20,6 +20,7 @@ import kotlin.math.sqrt
  *     以及第 -2 排（已越过城墙线）出现的怪底色。见 auditWall / auditZeroFrame。
  *  6. 0.45：连续性闸门。本帧不是上一轮预测的延续（预测命中 < 一半：结算屏压暗 / 新一波 / 点空）时，
  *     ① 贴墙漏数不计入、不进代点（prevMiss 清空）；② 上一次点击的记消作废，不进「记消」。
+ *  9. 0.49：决策前就确认漏数幽灵伙（confirmedLeakComps：预测里有怪 / 上轮审计在下一排也有），不再等选点后的审计。
  *  8. 0.47：半截帧检测 unshiftedMatch（点后第一帧伙已消、整盘还没上移），Runner 据此等上移再扫。
  *  7. 0.45b：整帧盖层检测 frameVeil（发白 / 压暗），盖层帧按不连续帧处理。
  *     另：漏数伙作为“幽灵伙”进期限余量（见 ghostComps），代点只认含 -1 排格的伙。
@@ -578,6 +579,30 @@ object BoardMemory {
                 .thenBy { g -> g.minOf { it.second } }
                 .thenBy { g -> g.minOf { it.first } }
         )
+    }
+
+    /** 0.49 确认过的漏数幽灵伙：决策这一帧里底色有怪、模板没检出的格子，且有旁证它真是怪：
+     *  ① 上一轮预测里这格有怪（上一帧检出过，被点的伙以外没理由消失；类型取预测的）；
+     *  ② 上一轮审计在下一排（c, r+1）也有漏数格（它随盘上移到这里）。
+     *  旧口径（wallMissGroups）只用上一轮审计映射，且审计在选点之后才跑：36 局 13:51:04 那轮 9 格漏数全是本帧新出现，
+     *  选点时一格都看不到，余量算成 2，实际 -1 排已有 3 只没认出的怪，点谁都越线，却改点了 1 只的史莱姆而不是 7 只的土豆怪。
+     *  没有旁证的漏数格仍只记日志（审计照常），不进决策。返回按类型连片后的伙（类型名「漏数-<预测类型>」/「漏数-?」）。 */
+    fun confirmedLeakComps(frame: Bitmap?, detected: Set<Pair<Int, Int>>): List<Pair<String, Matcher.Comp>> {
+        if (frame == null || frame.isRecycled || assistOffBattle) return emptyList()
+        return try {
+            val cells = ArrayList<Cell>()
+            for (r in -1..1) for (c in 0..5) {
+                if (Pair(c, r) in detected) continue
+                if (monsterBg(frame, c, r) != true) continue
+                val pred = predicted.firstOrNull { it.col == c && it.row == r }
+                if (pred != null) cells.add(Cell("漏数-" + pred.type, c, r))
+                else if (Pair(c, r + 1) in prevMiss) cells.add(Cell("漏数-?", c, r))
+            }
+            groupCells(cells).map { g ->
+                val pts = g.map { cellCenter(it.col, it.row) }
+                g.first().type to Matcher.Comp(pts.minByOrNull { it.y }!!, g.size, 0.0, ys = pts.map { it.y }, cells = pts)
+            }
+        } catch (e: Exception) { emptyList() }
     }
 
     /** 0.45 代点只认“救命级”伙：含 -1 排格的伙。只在 0 排的漏数伙还能再等一施法，不值得抢这一次施法。 */

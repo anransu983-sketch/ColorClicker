@@ -606,12 +606,16 @@ object Runner {
         val detectedCells = all.flatMap { it.comp.cells.ifEmpty { listOf(it.comp.point) } }
             .map { Pair(colOf(it.x), rowOf(it.y)) }.toSet()
         val liveFrame = BoardMemory.continuesPrediction(compsAll) && !BoardMemory.frameVeiled(frame)   // 0.45b：发白/压暗盖层帧也不算 live
-        // 已识别的伙里有贴墙（-1 排）的：它是确定存在的，漏数格（可能误报）不能拿它换；此时含 -1 排格的幽灵伙
-        // 不进求解器（否则人人 hz=-1，求解器会放弃这个确定的 -1 排伙去点别的），只让 0 排的幽灵伙进余量。
         val detectedAtWall = all.any { BoardMemory.minRowOf(it.comp) <= -1 }
-        val ghostGroups = (if (liveFrame) BoardMemory.wallMissGroups(detectedCells) else emptyList())
-            .filter { g -> !detectedAtWall || g.none { it.second <= -1 } }
-        val ghosts = BoardMemory.ghostComps(ghostGroups)
+        // 0.49：幽灵伙改为决策前就看这一帧的漏数，只认有旁证的（预测里有怪 / 上轮审计在下一排也有，见 confirmedLeakComps）。
+        // 有旁证的 -1 排幽灵伙不再因“已识别伙在 -1 排”被剔除：它们是上一帧还认得出的怪，只是这一帧模板失手，不是可能的误报。
+        // 36 局 13:51:04：已识别 1 只在 -1 排 + 3 只幽灵在 -1 排 → 点谁都越线，应当点只数最大的伙。
+        val ghosts = if (liveFrame) BoardMemory.confirmedLeakComps(frame, detectedCells) else emptyList()
+        if (ghosts.isNotEmpty()) {
+            AppLog.d("匹配", "决策前漏数幽灵伙 ${ghosts.size} 个（底色有怪、模板没检出、有旁证）：" + ghosts.joinToString("；") { (name, c) ->
+                name.removePrefix("漏数-").removePrefix("守卫-") + c.cells.joinToString("、", "（", "）") { "第 ${colOf(it.x) + 1} 列第 ${rowOf(it.y)} 排" }
+            } + "，进期限余量")
+        }
         val evs = all.map { Ev(it, BoardMemory.horizonAfterKill(compsAll + ghosts, it.comp)) }
         val ranked = evs.sortedWith(
             compareByDescending<Ev> { minOf(it.hz, HZ_CAP) }
@@ -648,7 +652,10 @@ object Runner {
         // 守卫改为“已识别的伙里没有 -1 排的”（0.44 是 pick 不在 -1 排）：已识别伙在 -1 排时，漏数伙（-1 排）和它是两伙，
         // 一次施法只能清一伙，点谁另一伙都越线——保留“确定存在”的已识别伙，不拿它换一个可能是误报的漏数格。
         // 注意 0.44 的 pick 守卫在有幽灵伙时会失效（人人 hz=-1，求解器不一定点 -1 排伙），所以改成直接看棋盘。
-        val fbGroups = if (liveFrame) BoardMemory.wallMissFallbackGroups(detectedCells) else emptyList()
+        // 0.49：代点候选 = 含 -1 排格的幽灵伙（同上，有旁证）；伙内取格、落点逻辑不变。
+        val fbGroups = ghosts.filter { BoardMemory.minRowOf(it.second) <= -1 }
+            .map { (_, c) -> c.cells.map { Pair(colOf(it.x), rowOf(it.y)) } }
+            .sortedByDescending { it.size }
         if (fbGroups.isNotEmpty() && detectedAtWall) {
             AppLog.w("匹配", "贴墙漏数伙 ${fbGroups.size} 个含 -1 排格，但已识别的伙里也有 -1 排的：一次只能清一伙，点谁都有一伙越线，保留已识别的伙（漏数格：${fbGroups.first().joinToString("、") { "第 ${it.first + 1} 列第 ${it.second} 排" }}）")
         }
