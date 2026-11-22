@@ -28,14 +28,14 @@ data class LogLine(
 /**
  * 详细日志：三处同时写
  * 1. Logcat（adb 可看）
- * 2. 内存环形缓冲（应用内日志页实时看，最多保留 1000 条）
+ * 2. 内存环形缓冲（应用内日志页实时看，最多保留 10000 条）
  * 3. 文件 filesDir/logs/app.log（保存在本机，跨重启保留，超 1MB 自动轮换为 app.log.1）
  *
  * 崩溃也不丢日志：启动时把文件里的旧日志读回内存，日志页直接能看到崩溃前的记录；
  * 未捕获异常由全局 handler 先把堆栈写进 logs/crash.log 与 app.log 再交给系统。
  */
 object AppLog {
-    const val MAX_LINES = 1000
+    const val MAX_LINES = 10000
     private const val MAX_FILE_BYTES = 1024 * 1024L
     private val LINE_PATTERN =
         Pattern.compile("^(\\d{2}:\\d{2}:\\d{2}\\.\\d{3}) \\[(DEBUG|INFO|WARN|ERROR)]\\[(.+?)] (.*)$")
