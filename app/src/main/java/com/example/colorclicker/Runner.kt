@@ -85,6 +85,9 @@ object Runner {
     private var lastSig = ""
     private var sameRounds = 0
     @Volatile private var noEffectStop = false
+    /** 0.58：棋盘冻住计数（43 局收尾失灵：蝎子相似度在签名临界 0.81 上下抖，签名一字不差永远凑不满 3 轮，
+     *  但 settle 的“8 帧不变”冻住信号不依赖签名；连续 2 轮冻住且中间没有活帧就停）。活帧（liveFrame）时清零。 */
+    private var frozenRounds = 0
     @Volatile private var lastTapAt = 0L
 
     /** 0.22 防重复点：上次扎堆点击的目标与点之前那盘的签名。棋盘没变又选中同一目标 = 读到的是点之前的旧帧，跳过不点 */
@@ -248,7 +251,7 @@ object Runner {
             val normalRules = rules - clusterRules.toSet()
             AppLog.i("服务", "开始运行：${rules.size} 条启用规则 [${rules.joinToString("、") { it.name }}]，循环 ${if (maxClicks > 0) "$maxClicks 次" else "无限"}" + if (clusterRules.isNotEmpty()) "（扎堆规则每轮比期限再点）" else "")
             if (rules.isEmpty()) AppLog.w("服务", "没有启用的规则，不会执行任何点击")
-            lastSig = ""; sameRounds = 0; noEffectStop = false; lastTapAt = 0L
+            lastSig = ""; sameRounds = 0; noEffectStop = false; frozenRounds = 0; lastTapAt = 0L
             lastTapRuleId = null; lastTapPoint = null; lastTapBoardSig = ""; pendingBoardSig = ""; repeatSkips = 0; lastTapFrameSig = null
             slideRetries = 0; slidingFlag = false; staleRetries = 0; staleFlag = false; zeroShotDone = false; zeroShots = 0; clearReplay()
             preTapAborts = 0; pickDecidedAt = 0L; settleUnchanged = false
@@ -648,6 +651,12 @@ object Runner {
         val stale = if (settleUnchanged) null else staleRaw
         if (staleRaw != null && stale == null && staleRetries == 0) {
             AppLog.d("匹配", "点后 ${SETTLE_TRIES} 帧画面都没变：整盘冻住，不是半截帧（原排吻合 ${staleRaw.first}/${staleRaw.second}），跳过上移等待")
+            frozenRounds++
+            if (frozenRounds >= 2) {
+                AppLog.w("匹配", "连续 $frozenRounds 轮棋盘冻住：点击没有触发施法，战斗已结束，自动停止")
+                noEffectStop = true
+                return null
+            }
         }
         if (stale != null) {
             staleRetries++
@@ -679,6 +688,7 @@ object Runner {
         val detectedCells = all.flatMap { it.comp.cells.ifEmpty { listOf(it.comp.point) } }
             .map { Pair(colOf(it.x), rowOf(it.y)) }.toSet()
         val liveFrame = BoardMemory.continuesPrediction(compsAll) && !BoardMemory.frameVeiled(frame)   // 0.45b：发白/压暗盖层帧也不算 live
+        if (liveFrame) frozenRounds = 0   // 0.58：活帧说明棋盘在推进，冻住计数清零
         val detectedAtWall = all.any { BoardMemory.minRowOf(it.comp) <= -1 }
         // 0.49：幽灵伙改为决策前就看这一帧的漏数，只认有旁证的（预测里有怪 / 上轮审计在下一排也有，见 confirmedLeakComps）。
         // 有旁证的 -1 排幽灵伙不再因“已识别伙在 -1 排”被剔除：它们是上一帧还认得出的怪，只是这一帧模板失手，不是可能的误报。

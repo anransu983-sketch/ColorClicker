@@ -30,6 +30,7 @@ import kotlin.math.sqrt
  *     新阈值 = max(0.56, min(基准, 最低有证档位分 − 0.02))，只降不升，下限 0.56（0.32 实测空盘噪声 ≤0.53）；
  *     ③ 整伙落空补点：总落空诊断（整伙原位仍在、一格没清）记下那伙，下轮若它还在盘上（上移一格后）且已到
  *     0 排及上，优先补点它一次，不再白白丢一轮。
+ *  11. 0.58：诊断图破上限（FOLLOWUP-049）：漏数 ≥5 格的轮次破 4 张/局上限存图，普通图仍限 4 张。
  *  数据存在 filesDir/guard_memory.json。 */
 object BoardMemory {
     private const val COL0_X = 117
@@ -404,7 +405,7 @@ object BoardMemory {
                 AppLog.w("记忆", "漏数嫌疑：被点那伙（${pick.size} 只）旁边有 $sus 格同类怪相似度略低于阈值，没算进只数，实际可能清得更多")
             }
         }
-        if (gone.size >= 2 || sus > 0) dump(frame, if (sus > 0) "近阈值漏数嫌疑" else "预测消失 ${gone.size} 格")
+        if (gone.size >= 2 || sus > 0) dump(frame, if (sus > 0) "近阈值漏数嫌疑" else "预测消失 ${gone.size} 格", gone.size >= 5 || sus >= 5)
         // 3. 相似度记忆
         for ((name, c) in comps) {
             val s = typeStats.getOrPut(name) { TypeStat() }
@@ -824,15 +825,16 @@ object BoardMemory {
         }
     }
 
-    private fun dump(frame: Bitmap?, why: String) {
+    // 0.58：漏数 ≥5 格的诊断图破上限存（FOLLOWUP-049：上限 4 会把真正要看的高漏轮次拦掉；普通图仍限 4 张/局）。
+    private fun dump(frame: Bitmap?, why: String, bypassCap: Boolean = false) {
         val ctx = appCtx ?: return
-        if (frame == null || dumps >= MAX_DUMPS) return
+        if (frame == null || (!bypassCap && dumps >= MAX_DUMPS)) return
         dumps++
         try {
             val dir = ctx.getExternalFilesDir(null) ?: ctx.filesDir
             val f = File(dir, "gap_${battles + 1}_$roundNo.jpg")
             FileOutputStream(f).use { frame.compress(Bitmap.CompressFormat.JPEG, 85, it) }
-            AppLog.i("记忆", "已存诊断截图 ${f.absolutePath}（$why）")
+            AppLog.i("记忆", "已存诊断截图 ${f.absolutePath}（$why${if (bypassCap) "，漏数≥5破上限" else ""}）")
         } catch (e: Exception) {
             AppLog.w("记忆", "诊断截图保存失败")
         }
