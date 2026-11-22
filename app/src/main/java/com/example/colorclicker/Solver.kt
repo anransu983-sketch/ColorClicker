@@ -21,6 +21,16 @@ package com.example.colorclicker
  * 余量 hz 不再参与排序：只用来排除 hz == -1（点完即撞墙）的候选，除非全部候选都是 -1。
  * 0.56 之前余量排第一，单只离墙远、余量高会赢过墙边的大伙——那就是“打着打着只打单个怪”的根因。
  * 改后大伙优先；代价是局可能短一点（每下清得多但总下数少了），总分涨不涨得真机验。
+ * 0.59 生存优先（1000+ 线：46 局只活 15 轮，墙破才是瓶颈）：
+ *  求解器之前只拿 hz 当过滤（除 -1），其余全按两步值挑——于是它会为多几只现在分，
+ *  选一个 hz == 0 的候选（下一施法必漏一伙，两伙同时压线只能清一伙），哪怕旁边有个 hz >= 1
+ *  的安全候选；期限规则（按 hz 排）算出来了也会被求解器覆盖掉。46 局就是这么被墙顶破的。
+ *  改法：先取 hz >= 1 的安全子集（点完后至少 2 轮内不强制撞墙），再在其中按两步值挑；
+ *  安全子集不存在时回落旧口径（hz != -1，仍无则全量），反正要结束、多拿几只。
+ *  本地仿真（同盘 400 局，复刻 horizon/simulateNext/两步值）：现行 6.1 轮/198 分，
+ *  hz>=1 7.3 轮/216 分，hz>=2 8.1 轮/234 分，期限优先 9.0 轮/242 分。
+ *  没直接上期限优先：0.19 期限优先在真机上分低被 0.43 求解器取代，仿真盘偏墙压、会高估它；
+ *  hz>=1 是最小干预——只在“现在多拿几只 vs 下一轮必死”时拦住求解器，其余轮次行为与 0.57 完全一致。
  * 深度做到两步：新刷的怪未知，更深的步数是假精度，不做；合群只留作并列时的末位排序。
  * 两步值用全权重（不是以前影子模式的 0.5）：下一步就是紧接着的一次施法，
  * 下轮最大一伙来自已存活的格子；新刷的怪未知，两边都不算，所以不用折扣。
@@ -50,14 +60,18 @@ object Solver {
         return Eval(ruleName, comp, hz, comp.size + nextMax, nextMax, cluster, ends)
     }
 
-    /** 选出本轮该点的一伙；空棋盘返回 null。hz == -1（点完即撞墙）的候选一律排除，
-     *  除非全部候选都是 -1（那局反正要结束，选两步值最大的）。
-     *  0.56 起余量只作过滤、不参与排序：可点的里面按两步值 → 只数 → 靠墙 → 合群 → 相似度排，
-     *  大伙优先，单只不再靠余量高赢过大伙。 */
+    /** 选出本轮该点的一伙；空棋盘返回 null。
+     *  0.59 生存优先：先取 hz >= 1 的安全子集（点完后至少 2 轮内不强制撞墙），再在其中按
+     *  两步值 → 只数 → 靠墙 → 合群 → 相似度排；安全子集不存在时回落旧口径（hz != -1，仍无则全量）。
+     *  hz == -1（点完即撞墙）的候选只在全部候选都是 -1 时才入选。 */
     fun pick(compsAll: List<Pair<String, Matcher.Comp>>, ghosts: List<Pair<String, Matcher.Comp>> = emptyList()): Eval? {
         if (compsAll.isEmpty()) return null
         val evals = compsAll.map { (name, comp) -> eval(compsAll, name, comp, ghosts) }
-        val pool = evals.filter { it.hz != -1 }.ifEmpty { evals }
+        val safe = evals.filter { it.hz >= 1 }
+        val pool = when {
+            safe.isNotEmpty() -> safe
+            else -> evals.filter { it.hz != -1 }.ifEmpty { evals }
+        }
         return pool.sortedWith(
             compareByDescending<Eval> { it.value }
                 .thenByDescending { it.comp.size }
