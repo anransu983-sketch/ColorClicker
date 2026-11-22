@@ -458,7 +458,9 @@ object BoardMemory {
      *  的怪，下轮一个对的怪刷进缺口就把两伙连成一伙）。返回最大的“两伙只数之和 + 1”（+1 是刷进来的那只）；
      *  没有这种缺口返回 0。只算“能连起两伙”的缺口：单个伙旁边的空格顶多让它多 1 只，那部分两步值里
      *  已经有了，不另算。点完即越线时返回 0。新刷约 10 只/轮、8 种怪，一个缺口每轮大多会被别的怪先占掉，
-     *  所以 Solver 里合群只按 1/3 折算进三步值，不按满值算。 */
+     *  所以 Solver 里合群只按 1/3 折算进三步值，不按满值算。
+     *  0.55：只算两边的伙点完后 minRow ≥ 1 的缺口（至少还能活两轮，等得到对的怪）；墙边的桥（42 局
+     *  合群 12 的桥两轮就没了）不再算分。 */
     fun clusterPotential(all: List<Pair<String, Matcher.Comp>>, tapped: Matcher.Comp, tappedName: String): Int {
         val actual = all.flatMap { (name, c) ->
             c.cells.ifEmpty { listOf(c.point) }.map { Cell(name, colOf(it.x), rowOfY(it.y)) }
@@ -469,6 +471,9 @@ object BoardMemory {
         if (rest.any { it.row < -1 }) return 0
         val groups = groupCells(rest)
         if (groups.size < 2) return 0
+        // 0.55：桥两边的伙都得点完后 minRow ≥ 1（至少还能活两轮）才算——墙边的桥等不到对的怪
+        // （42 局合群 12 的桥两轮就没了）；minRow 是伙里最靠墙那只的排，-1 = 下轮就撞墙。
+        val groupMinRow = groups.map { g -> g.minOf { it.row } }
         val occupied = rest.map { Pair(it.col, it.row) }.toSet()
         val owner = HashMap<Pair<Int, Int>, Int>()
         groups.forEachIndexed { gi, g -> g.forEach { owner[Pair(it.col, it.row)] = gi } }
@@ -481,8 +486,9 @@ object BoardMemory {
                 byType.getOrPut(groups[gi].first().type) { HashSet() }.add(gi)
             }
             for ((_, gis) in byType) {
-                if (gis.size >= 2) {
-                    val pot = gis.sumOf { groups[it].size } + 1
+                val live = gis.filter { groupMinRow[it] >= 1 }
+                if (live.size >= 2) {
+                    val pot = live.sumOf { groups[it].size } + 1
                     if (pot > best) best = pot
                 }
             }
