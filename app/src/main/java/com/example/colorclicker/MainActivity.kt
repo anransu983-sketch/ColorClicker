@@ -1,6 +1,8 @@
 package com.example.colorclicker
 
 import android.Manifest
+import android.content.ClipData
+import android.content.ClipboardManager
 import android.content.Context
 import android.content.Intent
 import android.graphics.Bitmap
@@ -226,9 +228,23 @@ class MainActivity : ComponentActivity() {
                 onDismissRequest = { showMemory = false },
                 title = { Text("记忆学习（累计）") },
                 text = {
-                    Text(
-                        memText ?: "还没打过一局，记忆是空的。\n打完一局后回来这里看累计；单局的本局记忆、核实对账在日志里，分类选「记忆」就能只看它。"
-                    )
+                    // 0.65：内容长了划不动，改成上下滚动；加复制按钮，方便贴给别人看
+                    Column(Modifier.verticalScroll(rememberScrollState())) {
+                        Text(
+                            memText ?: "还没打过一局，记忆是空的。\n打完一局后回来这里看累计；单局的本局记忆、核实对账在日志里，分类选「记忆」就能只看它。"
+                        )
+                    }
+                },
+                dismissButton = {
+                    TextButton(
+                        onClick = {
+                            val t = memText ?: return@TextButton
+                            val cm = ctx.getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
+                            cm.setPrimaryClip(ClipData.newPlainText("ColorClicker 记忆学习", t))
+                            Toast.makeText(ctx, "已复制记忆学习", Toast.LENGTH_SHORT).show()
+                        },
+                        enabled = memText != null
+                    ) { Text("复制") }
                 },
                 confirmButton = { TextButton({ showMemory = false }) { Text("知道了") } }
             )
