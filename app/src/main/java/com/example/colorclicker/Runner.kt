@@ -619,10 +619,10 @@ object Runner {
             val solverEv = evs.first { it.cand.comp === solverEval.comp }
             if (solverEv.cand.comp !== pickEv.cand.comp) {
                 val deadlineEval = Solver.eval(compsAll, pickEv.cand.rule.name, pickEv.cand.comp, ghosts)
-                AppLog.i("最优解", "最优解改点：期限规则点「${pickEv.cand.rule.name.removePrefix("守卫-")}」${pickEv.cand.comp.size}只（两步${deadlineEval.twoStep}），改点「${solverEval.ruleName.removePrefix("守卫-")}」${solverEval.comp.size}只（两步${solverEval.twoStep}）")
+                AppLog.i("最优解", "最优解改点：期限规则点「${pickEv.cand.rule.name.removePrefix("守卫-")}」${pickEv.cand.comp.size}只（两步${deadlineEval.twoStep}＋合群${deadlineEval.cluster}），改点「${solverEval.ruleName.removePrefix("守卫-")}」${solverEval.comp.size}只（两步${solverEval.twoStep}＋合群${solverEval.cluster}）")
                 pickEv = solverEv
             } else {
-                AppLog.d("最优解", "最优解和期限规则一致，点「${pickEv.cand.rule.name}」${pickEv.cand.comp.size}只，两步值${solverEval.twoStep}")
+                AppLog.d("最优解", "最优解和期限规则一致，点「${pickEv.cand.rule.name}」${pickEv.cand.comp.size}只，两步值${solverEval.twoStep}＋合群${solverEval.cluster}")
             }
         }
         // 0.51 落空补点：上轮整伙原位仍在、一格没清（总落空诊断已记下那伙）。这轮若它还在盘上
@@ -706,10 +706,12 @@ object Runner {
         } else {
             repeatSkips = 0
         }
+        // 0.54 合群：最终点的那伙留下的可合群数（代点时点的不是已识别的伙，不算）。
+        val pickCluster = if (wallFallback == null) Solver.eval(compsAll, pick.rule.name, pick.comp, ghosts).cluster else 0
         if (wallFallback != null) {
             AppLog.w("匹配", "$summary → 贴墙漏数代点：第 ${wallFallbackCell!!.first + 1} 列第 ${wallFallbackCell!!.second} 排（${wallFallback!!.x},${wallFallback!!.y}），同伙漏数 ${wallFallbackGroup.size} 格（${wallFallbackGroup.joinToString("、") { "第 ${it.first + 1} 列第 ${it.second} 排" }}）（模板没认出、底色有怪；期限规则本来点「$origPickDesc」）候选前三：$top3")
         } else {
-            AppLog.d("匹配", "$summary → 点「${pick.rule.name}」（连成 ${pick.comp.size} 只，其中贴墙 $wallCnt 只，y${pick.comp.point.y}，相似度 ${"%.3f".format(pick.comp.score)}，${hzText(pickEv.hz)}）候选前三：$top3")
+            AppLog.d("匹配", "$summary → 点「${pick.rule.name}」（连成 ${pick.comp.size} 只，其中贴墙 $wallCnt 只，y${pick.comp.point.y}，相似度 ${"%.3f".format(pick.comp.score)}，${hzText(pickEv.hz)}，合群$pickCluster）候选前三：$top3")
         }
         AppLog.d("性能", "本轮识别 ${(t3 - t0) / 1_000_000}ms（截图转换 ${(t1 - t0) / 1_000_000} / 匹配 ${(t2 - t1) / 1_000_000} / 决策 ${(t3 - t2) / 1_000_000}）")
         if (wallFallback == null && bySize.cand.comp !== pick.comp && bySize.cand.comp.size > pick.comp.size) {

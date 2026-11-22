@@ -453,6 +453,43 @@ object BoardMemory {
         return Triple(ends, next.toInt(), threat)
     }
 
+    /** 0.54 合群：点掉 tapped 后，其余上移一格，棋盘上“一个缺口能连起两伙同种怪”的最大可合群数。
+     *  缺口 = 空格子，上下左右邻着 ≥2 个同种怪的伙（可以是被点掉那伙腾出来的格子——清掉隔在两伙中间
+     *  的怪，下轮一个对的怪刷进缺口就把两伙连成一伙）。返回最大的“两伙只数之和 + 1”（+1 是刷进来的那只）；
+     *  没有这种缺口返回 0。只算“能连起两伙”的缺口：单个伙旁边的空格顶多让它多 1 只，那部分两步值里
+     *  已经有了，不另算。点完即越线时返回 0。新刷约 10 只/轮、8 种怪，一个缺口每轮大多会被别的怪先占掉，
+     *  所以 Solver 里合群只按 1/3 折算进三步值，不按满值算。 */
+    fun clusterPotential(all: List<Pair<String, Matcher.Comp>>, tapped: Matcher.Comp, tappedName: String): Int {
+        val actual = all.flatMap { (name, c) ->
+            c.cells.ifEmpty { listOf(c.point) }.map { Cell(name, colOf(it.x), rowOfY(it.y)) }
+        }
+        val tappedCells = tapped.cells.ifEmpty { listOf(tapped.point) }
+            .map { Cell(tappedName, colOf(it.x), rowOfY(it.y)) }.toSet()
+        val rest = actual.filter { it !in tappedCells }.map { Cell(it.type, it.col, it.row - 1) }
+        if (rest.any { it.row < -1 }) return 0
+        val groups = groupCells(rest)
+        if (groups.size < 2) return 0
+        val occupied = rest.map { Pair(it.col, it.row) }.toSet()
+        val owner = HashMap<Pair<Int, Int>, Int>()
+        groups.forEachIndexed { gi, g -> g.forEach { owner[Pair(it.col, it.row)] = gi } }
+        var best = 0
+        for (col in 0..5) for (row in -1..6) {
+            if (Pair(col, row) in occupied) continue
+            val byType = HashMap<String, MutableSet<Int>>()
+            for ((dc, dr) in listOf(1 to 0, -1 to 0, 0 to 1, 0 to -1)) {
+                val gi = owner[Pair(col + dc, row + dr)] ?: continue
+                byType.getOrPut(groups[gi].first().type) { HashSet() }.add(gi)
+            }
+            for ((_, gis) in byType) {
+                if (gis.size >= 2) {
+                    val pot = gis.sumOf { groups[it].size } + 1
+                    if (pot > best) best = pot
+                }
+            }
+        }
+        return best
+    }
+
     /** 按上下左右相连分伙（和 Matcher 一致：斜向不算一伙）。 */
     private fun groupCells(cells: List<Cell>): List<List<Cell>> {
         val left = cells.toMutableList()
