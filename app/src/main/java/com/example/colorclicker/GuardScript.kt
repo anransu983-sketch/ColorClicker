@@ -12,7 +12,7 @@ import java.util.Date
 import java.util.Locale
 
 /** 一键守卫城邦（0.18 建，0.20 补打完回挑战页，0.21 补免费没次数改点钻石＋开始挑战防连点，0.25 回退重做，0.34 回退再改，0.36 回退时自裁标题图）：
- *  从挑战页开始自动进场 → 点免费（今日免费次数用完、点了还在就改点钻石×100） → 关玩法介绍 → 点颜色辅助 → 交棒给消消乐跑一局 → 打完回挑战页。
+ *  从挑战页开始自动进场 → 点本次免费/免费（免费点了还在就改点本次免费、再改点钻石×100） → 关玩法介绍 → 点颜色辅助 → 交棒给消消乐跑一局 → 打完回挑战页。
  *  0.34：认结算页不再用 (802,1617) 像素——面板是半透明的，底下棋盘颜色透上来，
  *  (802,1617) 在 00:27 那张结算图上是 #41301e（蓝通道差 24），判不到，所以之前每局
  *  都是棋盘点 0 次＋返回键 0 次＋面板点 0 次。改成认「战斗结束」金字标题图
@@ -21,7 +21,10 @@ import java.util.Locale
  *  每一步都先在屏幕上找按钮的图片再点（不是死坐标），找不到就等、超时就停并写日志。
  *  用户 10:54–10:56 日志里的取色/框选没标是哪个按钮，对不上号，所以脚本不依赖那几个坐标，
  *  只认她 10:59 发的四张截图里裁出来的按钮图；她日志里 (1277,478) 那个点正好落在颜色辅助按钮里，对上了。
- *  钻石按钮图是她 2026-11-15 19:07 发的截图裁的（今日剩余次数：0 那张），中心约 (948,2190)。 */
+ *  0.52：排行榜弹窗里左「免费」今日剩余次数 0、点了没用，脚本只会等钻石×100（
+ *  那弹窗里根本没有钻石按钮），四次循环都卡死在这。补右「本次免费」黄按钮模板
+ *  （tpl_guard_free_this.png，从她 00:53 截图裁的，与 tpl_guard_free 同尺寸
+ *  363×134）：进场先找本次免费，免费点了还在也先试本次免费，再试钻石。 */
 object GuardScript {
     private var job: Job? = null
     fun isRunning() = job?.isActive == true
@@ -65,6 +68,7 @@ object GuardScript {
         job = CoroutineScope(Dispatchers.Default).launch {
             val tplStart = assetBitmap(ctx, "tpl_guard_start.png")
             val tplFree = assetBitmap(ctx, "tpl_guard_free.png")
+            val tplFreeThis = assetBitmap(ctx, "tpl_guard_free_this.png")
             val tplDiamond = assetBitmap(ctx, "tpl_guard_diamond.png")
             val tplClose = assetBitmap(ctx, "tpl_guard_close.png")
             val tplAssist = assetBitmap(ctx, "tpl_color_assist.png")
@@ -72,13 +76,14 @@ object GuardScript {
             val tplPotato = assetBitmap(ctx, "tpl_potato.png")
             val tplEnd = assetBitmap(ctx, "tpl_guard_end.png")
             if (tplEnd == null) AppLog.w("守卫", "战斗结束标题图 tpl_guard_end.png 读不到，打完回挑战页会认不到结算屏")
-            if (tplStart == null || tplFree == null || tplDiamond == null || tplClose == null || tplAssist == null) {
+            if (tplStart == null || tplFree == null || tplFreeThis == null || tplDiamond == null || tplClose == null || tplAssist == null) {
                 AppLog.e("守卫", "按钮模板缺失，一键守卫停了")
                 stop(); return@launch
             }
-            AppLog.i("守卫", "一键守卫开始：进场→免费（没次数就点钻石×100）→关介绍→点颜色辅助→开跑（只打一局）")
+            AppLog.i("守卫", "一键守卫开始：进场→本次免费/免费（没次数就点钻石×100）→关介绍→点颜色辅助→开跑（只打一局）")
             BoardMemory.beginBattle(ctx)
             var tappedFree = false
+            var tappedFreeThis = false
             var tappedFreeAt = 0L
             var tappedDiamond = false
             var diamondWarned = false
@@ -90,6 +95,18 @@ object GuardScript {
                 val frame = ScreenGrabber.grab()
                 if (frame == null) {
                     delay(300); continue
+                }
+                // 0.52 优先：排行榜弹窗右「本次免费」黄按钮（只在弹窗下半区找，
+                // 挑战页顶上那个小字「本次免费」不是按钮、尺寸也对不上模板）。
+                // 左蓝「免费」今日剩余次数 0 时点了没用，先点右边这个。
+                if (!tappedFree) {
+                    val ft = Matcher.findImage(frame, tplFreeThis, 0.75, listOf(700, 2050, 550, 250))
+                    if (ft != null) {
+                        AppLog.i("守卫", "找到本次免费入场，点 (${ft.x},${ft.y})")
+                        ClickService.tap(ft.x, ft.y); tappedFree = true; tappedFreeThis = true
+                        tappedFreeAt = System.currentTimeMillis()
+                        delay(1500); continue
+                    }
                 }
                 // 1. 免费入场（没点过才找）
                 if (!tappedFree) {
@@ -106,6 +123,16 @@ object GuardScript {
                 if (tappedFree && !tappedDiamond && System.currentTimeMillis() - tappedFreeAt > 2500) {
                     val stillFree = Matcher.findImage(frame, tplFree, 0.8, null)
                     if (stillFree != null) {
+                        // 0.52：免费点了还在，先试右边的本次免费（排行榜弹窗里没有钻石按钮），
+                        // 再试钻石×100。
+                        if (!tappedFreeThis) {
+                            val ft = Matcher.findImage(frame, tplFreeThis, 0.75, listOf(700, 2050, 550, 250))
+                            if (ft != null) {
+                                AppLog.i("守卫", "免费点了还在，改点本次免费 (${ft.x},${ft.y})")
+                                ClickService.tap(ft.x, ft.y); tappedFreeThis = true
+                                delay(1500); continue
+                            }
+                        }
                         val d = Matcher.findImage(frame, tplDiamond, 0.8, listOf(700, 2050, 550, 250))
                         if (d != null) {
                             AppLog.i("守卫", "免费点了还在（今日免费次数用完了），改点钻石×100 (${d.x},${d.y})")
