@@ -60,6 +60,8 @@ private fun parseGameSegs(lines: List<LogLine>): List<GameSeg> {
 }
 
 /** 应用内详细日志页：实时看、按分类/级别筛、清空、分享导出 */
+// 0.64：下拉按局筛用 ExposedDropdownMenuBox（实验性 Material3 API），本工程把它当错误，得显式 OptIn。
+@OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun LogScreen(onDismiss: () -> Unit) {
     val ctx = LocalContext.current
