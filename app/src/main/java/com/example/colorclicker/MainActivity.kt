@@ -168,7 +168,10 @@ class MainActivity : ComponentActivity() {
                             AppLog.i("规则", "守卫城邦内置规则：新增 $added 条，更新 $updated 条（点后延迟 600ms，按期限选目标）")
                             Toast.makeText(ctx, if (added + updated > 0) "内置规则已同步（新增 $added，更新 $updated）" else "内置规则已是最新", Toast.LENGTH_SHORT).show()
                         }) { Text("加载守卫城邦内置规则") }
-                        Button({ GuardScript.toggle(ctx) }) { Text("一键守卫城邦") }
+                        Button({
+                            GuardScript.toggle(ctx)
+                            overlayOn = BoardOverlay.isShowing()
+                        }) { Text("一键守卫城邦") }
                         Text("在挑战页点它：自动进场→免费（没次数就点钻石×100）→关介绍→点颜色辅助→开跑一局", style = MaterialTheme.typography.bodySmall)
                         // 0.67 悬浮迷你棋盘：仿 PC 辅助 3.0 的棋盘窗，实时显示 bot 认到的棋盘、红叉标要点的伙。
                         // 默认在左上角墙上（棋盘区域之外），别拖到棋盘上——悬浮窗会进截屏，盖住棋盘会让识别全乱。
@@ -187,7 +190,7 @@ class MainActivity : ComponentActivity() {
                                     Toast.makeText(ctx, "悬浮窗没开起来", Toast.LENGTH_SHORT).show()
                                 }
                             }) { Text(if (overlayOn) "悬浮棋盘：关" else "悬浮棋盘：开") }
-                            Text("实时显示 bot 认到的棋盘，红叉=这轮要点的伙", style = MaterialTheme.typography.bodySmall)
+                            Text("点一键守卫自动打开，红叉=这轮要点的伙", style = MaterialTheme.typography.bodySmall)
                         }
                         OutlinedButton({
                             val dir = ctx.getExternalFilesDir(null)
