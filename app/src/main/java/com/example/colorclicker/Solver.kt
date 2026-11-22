@@ -4,16 +4,18 @@ package com.example.colorclicker
  * 0.43 本地最优解求解器（删 AI 判点的替代）：
  * 纯本地计算，无网络、无 Key、无等待。输入本轮所有伙，输出该点的一伙。
  *
- * 选点顺序（安全永远优先于只数）：
- *  1) 余量 min(hz, HZ_CAP=6) 大优先——hz 是点完该伙后其余伙还能撑几轮，-1 = 点完即撞墙；
- *  2) 三步值大优先——两步值（本轮只数 + 下轮最大一伙只数，确定的）+ 合群/3；
+ * 选点顺序（0.56 起只数优先，余量只作必死过滤）：
+ *  1) 三步值大优先——两步值（本轮只数 + 下轮最大一伙只数，确定的）+ 合群/3；
  *     合群 = 点完后棋盘上一个缺口能连起的最大伙（两伙只数之和 + 1，见 BoardMemory.clusterPotential），
  *     要一次“对的怪刷进缺口”才兑现（新刷约 10 只/轮、8 种怪，缺口每轮大多被别的怪先占掉），所以只按 1/3 折算；
  *     0.55 起只算两边的伙还能活两轮（点完后 minRow ≥ 1）的桥，墙边的桥不等了；
  *     合群不亏：不成也只是换了个点法顺序（不成时两伙还是各清一次），成了多清一伙还省一次施法；
- *  3) 本轮只数大优先；
- *  4) 最靠墙（minRow 小）优先；
- *  5) 相似度大优先。
+ *  2) 本轮只数大优先；
+ *  3) 最靠墙（minRow 小）优先；
+ *  4) 相似度大优先。
+ * 余量 hz 不再参与排序：只用来排除 hz == -1（点完即撞墙）的候选，除非全部候选都是 -1。
+ * 0.56 之前余量排第一，单只离墙远、余量高会赢过墙边的大伙——那就是“打着打着只打单个怪”的根因。
+ * 改后大伙优先；代价是局可能短一点（每下清得多但总下数少了），总分涨不涨得真机验。
  * 深度做到三步：第三步是合群（一个缺口 + 一次对的怪），不是假装知道新刷长在哪——
  * 它只算“缺口存在”，兑现概率按 1/3 折进三步值；更深的步数才是假精度，不做。
  * 两步值用全权重（不是以前影子模式的 0.5）：下一步就是紧接着的一次施法，
@@ -45,14 +47,15 @@ object Solver {
     }
 
     /** 选出本轮该点的一伙；空棋盘返回 null。hz == -1（点完即撞墙）的候选一律排除，
-     *  除非全部候选都是 -1（那局反正要结束，选三步值最大的）。 */
+     *  除非全部候选都是 -1（那局反正要结束，选三步值最大的）。
+     *  0.56 起余量只作过滤、不参与排序：可点的里面按三步值 → 只数 → 靠墙 → 相似度排，
+     *  大伙优先，单只不再靠余量高赢过大伙。 */
     fun pick(compsAll: List<Pair<String, Matcher.Comp>>, ghosts: List<Pair<String, Matcher.Comp>> = emptyList()): Eval? {
         if (compsAll.isEmpty()) return null
         val evals = compsAll.map { (name, comp) -> eval(compsAll, name, comp, ghosts) }
         val pool = evals.filter { it.hz != -1 }.ifEmpty { evals }
         return pool.sortedWith(
-            compareByDescending<Eval> { minOf(it.hz, BoardMemory.HZ_CAP) }
-                .thenByDescending { it.value }
+            compareByDescending<Eval> { it.value }
                 .thenByDescending { it.comp.size }
                 .thenBy { BoardMemory.minRowOf(it.comp) }
                 .thenByDescending { it.comp.score }
