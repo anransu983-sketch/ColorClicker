@@ -1,6 +1,8 @@
 package com.example.colorclicker
 
 import android.content.Context
+import android.graphics.Bitmap
+import android.graphics.BitmapFactory
 import android.graphics.Canvas
 import android.graphics.Color
 import android.graphics.Paint
@@ -94,6 +96,27 @@ class BoardView(ctx: Context) : View(ctx) {
         color = 0xFFFF9800.toInt()
         style = Paint.Style.STROKE
     }
+    private val bitmapPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply { isFilterBitmap = true }
+    private val tplCache = HashMap<String, Bitmap?>()
+
+    /** 怪的模板图（assets 里 9 张都有）：按类型取，解一次后缓存；读不到返回 null（画首字兜底）。 */
+    private fun tplFor(type: String): Bitmap? {
+        val asset = when {
+            "土豆" in type -> "tpl_potato.png"
+            "史莱姆" in type -> "tpl_slime.png"
+            "蝎子" in type -> "tpl_scorpion.png"
+            "树" in type -> "tpl_tree.png"
+            "蛇" in type -> "tpl_snake.png"
+            "花仙" in type -> "tpl_fairy.png"
+            "水母" in type -> "tpl_jellyfish.png"
+            "野猪" in type -> "tpl_boar.png"
+            "蘑菇" in type -> "tpl_mushroom.png"
+            else -> return null
+        }
+        return tplCache.getOrPut(asset) {
+            try { context.assets.open(asset).use { BitmapFactory.decodeStream(it) } } catch (_: Exception) { null }
+        }
+    }
 
     override fun onMeasure(widthMeasureSpec: Int, heightMeasureSpec: Int) {
         val c = cellPx.toInt()
@@ -126,7 +149,20 @@ class BoardView(ctx: Context) : View(ctx) {
                     fillPaint.style = Paint.Style.FILL
                     fillPaint.color = color
                     canvas.drawRoundRect(RectF(left + 2f, top + 2f, left + c - 2f, top + c - 2f), 8f, 8f, fillPaint)
-                    canvas.drawText(boardLabelOf(cell.type), left + c / 2, top + c / 2 + textPaint.textSize * 0.35f, textPaint)
+                    // 0.68：有模板就画怪的图（按原比例缩进格里、彩框留边），没模板才退回首字
+                    val tpl = tplFor(cell.type)
+                    if (tpl != null) {
+                        val inset = c * 0.08f
+                        val availW = c - inset * 2
+                        val availH = c - inset * 2
+                        val scale = minOf(availW / tpl.width, availH / tpl.height)
+                        val dw = tpl.width * scale
+                        val dh = tpl.height * scale
+                        val dst = RectF(left + (c - dw) / 2, top + (c - dh) / 2, left + (c - dw) / 2 + dw, top + (c - dh) / 2 + dh)
+                        canvas.drawBitmap(tpl, null, dst, bitmapPaint)
+                    } else {
+                        canvas.drawText(boardLabelOf(cell.type), left + c / 2, top + c / 2 + textPaint.textSize * 0.35f, textPaint)
+                    }
                 } else {
                     fillPaint.style = Paint.Style.FILL
                     fillPaint.color = 0xFF2A2118.toInt()
