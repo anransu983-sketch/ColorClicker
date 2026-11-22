@@ -483,10 +483,16 @@ object BoardMemory {
                 assistOffBattle = false; assistOffLogged = false
                 AppLog.i("记忆", "颜色辅助抽查恢复正常（抽查 $sampled 个，$tinted 个底色有染），改判为已开，继续做贴墙漏数检测")
             }
+            // 0.50：多看一排（第 2 排）只进 prevMiss、不计入贴墙漏数：上一轮在 2 排没被认出的怪，这一轮上移到 1 排，
+            // 否则 confirmedLeakComps 的②号旁证（查 (c, r+1) 在不在 prevMiss）对 1 排幽灵伙永远查不到——prevMiss 里根本没有 2 排。
+            // 38 局 23:52:44 第 5 列第 1 排那格就是这么漏的：预测里没有它（上一轮在 2 排就没认出），②号旁证又够不着 2 排。
             val miss = ArrayList<Pair<Int, Int>>()
-            for (r in -1..1) for (c in 0..5) {
+            val miss2 = ArrayList<Pair<Int, Int>>()
+            for (r in -1..2) for (c in 0..5) {
                 if (Pair(c, r) in detected) continue
-                if (monsterBg(frame, c, r) == true) miss.add(Pair(c, r))
+                if (monsterBg(frame, c, r) == true) {
+                    if (r <= 1) miss.add(Pair(c, r)) else miss2.add(Pair(c, r))
+                }
             }
             if (!live) {
                 // 0.45：不连续帧（结算屏压暗 / 新一波 / 点空）上底色判据不可靠：不计入 wallMiss、清空 prevMiss（不进代点）。
@@ -501,7 +507,7 @@ object BoardMemory {
             }
             // 新出现：上一轮同一只若在下一排（施法后上移一格），位置是 (c, r+1)，已在上一轮漏数里就不再算新的
             val newCnt = miss.count { (c, r) -> Pair(c, r + 1) !in prevMiss }
-            prevMiss = miss.toSet()
+            prevMiss = (miss + miss2).toSet()
             wallMiss += miss.size; wallMissNew += newCnt
             if (miss.isEmpty()) {
                 prevMissBest = emptyMap()
