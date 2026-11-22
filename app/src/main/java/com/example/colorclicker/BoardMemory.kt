@@ -121,7 +121,7 @@ object BoardMemory {
 
     // ───────────── 0.51 漏检记分（跨局存盘）+ 落空补点 ─────────────
     /** 每种怪的漏检分桶：key = 分数×20 的档位（如 0.66→13），value = 该档出现次数。
-     *  只记底色确认有怪、最佳分低于基准阈值、且第一名比第二名高 ≥0.10 的格子；只记 0/1 排。 */
+     *  只记底色确认有怪、最佳分低于基准阈值、且第一名比第二名高 ≥0.05 的格子；只记 0/1 排。 */
     private val leakBuckets = HashMap<String, MutableMap<Int, Int>>()
     /** 各类型按漏检证据算出的有效阈值上限（只降不升）。重建新 map 再发布，读侧无锁安全。 */
     @Volatile private var adaptiveCaps: Map<String, Double> = emptyMap()
@@ -148,13 +148,15 @@ object BoardMemory {
 
     fun leakCount(name: String): Int = leakBuckets[name]?.values?.sum() ?: 0
 
-    /** 0.51：记一次漏检证据（auditWall 逐格诊断调）。只收 0/1 排、最佳分低于基准、第一名比第二名高 ≥0.10。
+    /** 0.51：记一次漏检证据（auditWall 逐格诊断调）。只收 0/1 排、最佳分低于基准、第一名比第二名高 ≥0.05。
+     *  0.53：分差门从 0.10 放宽到 0.05——40 局下来桶是空的，第 39 局两格 0 排漏数（土豆 0.660、史莱姆 0.709）
+     *  都因分差不到 0.10 没记进去；同一档出现 2 次才动阈值这条不变，错记要连错两次才动阈值，下限仍 0.56。 */
      *  同一档位第 2 次出现、且上限因此变动时打一行日志。 */
     private fun noteLeak(type: String, row: Int, best: Double, second: Double) {
         if (row < 0) return
         val base = baseThr(type)
         if (best >= base) return
-        if (best - second < 0.10) return
+        if (best - second < 0.05) return
         val buckets = leakBuckets.getOrPut(type) { HashMap() }
         val bucket = (best * 20).toInt()
         buckets[bucket] = (buckets[bucket] ?: 0) + 1
@@ -605,7 +607,7 @@ object BoardMemory {
                 // 0.44：把每格的最佳分（第一名）存下来，下一轮代点选落点用（见 missBestScore）。
                 prevMissBest = diag.mapValues { (_, top) -> top.maxOfOrNull { it.second } ?: 0.0 }
                 // 0.51：漏检记分——逐格诊断的第一名就是“底色确认有怪、模板没检出”的实测分，跨局攒起来回流阈值。
-                // 只记 0/1 排（-1 排半遮怪的低分是长相问题，0.41 已证）；第一名须比第二名高 ≥0.10 才认类型。
+                // 只记 0/1 排（-1 排半遮怪的低分是长相问题，0.41 已证）；第一名须比第二名高 ≥0.05 才认类型（0.53 从 0.10 放宽）。
                 for ((cell, top) in diag) {
                     if (cell.second < 0 || top.isEmpty()) continue
                     noteLeak(top[0].first, cell.second, top[0].second, top.getOrNull(1)?.second ?: 0.0)
