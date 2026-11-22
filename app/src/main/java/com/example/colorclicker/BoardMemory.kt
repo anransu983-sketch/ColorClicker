@@ -102,6 +102,9 @@ object BoardMemory {
     private var prevActual: List<Cell> = emptyList()   // 0.47：上一轮 onRound 看到的全部怪（没上移的原排位置），给 unshiftedMatch 用
     private var lastVeil = 0        // 0.45b：上一轮整帧盖层判定（0 无 / 1 发白 / 2 压暗），只用来让日志不刷屏
     private var roundNo = 0
+    private var battleStartMs = 0L       // 0.66 诊断：本局开跑时刻
+    private var leakRounds = 0           // 0.66 诊断：本局出现过（live 帧）贴墙漏数的扫描轮数
+    private var lastLeakRound = 0        // 0.66 诊断：最后一次出现贴墙漏数的轮序号（roundNo）
     private var dumps = 0
     private var battles = 0
     // 跨局累计（存盘）
@@ -247,6 +250,7 @@ object BoardMemory {
         predicted = emptyList(); predTotal = 0; predHit = 0; predNew = 0
         vanished = 0; suspect = 0; overrides = 0; verified = 0; topHit = 0; topTotal = 0; lastPicked = emptyList(); shots = 0
         casts = 0; loggedKills = 0; roundNo = 0; dumps = 0
+        battleStartMs = System.currentTimeMillis(); leakRounds = 0; lastLeakRound = 0
         tapCount = 0; pendingKills = 0; pendingCasts = 0; voidedCasts = 0; voidedKills = 0; verifiedCasts = 0; discMiss = 0; lastVeil = 0; prevActual = emptyList()
         wallMiss = 0; wallMissNew = 0; outMiss = 0; prevMiss = emptySet(); prevMissBest = emptyMap()
         missedCells = emptyList(); retries = 0   // 0.51：落空伙与补点计数按局清；漏检分桶与自适应上限跨局保留
@@ -708,6 +712,9 @@ object BoardMemory {
                 AppLog.w("记忆", "贴墙漏数：${miss.size} 格（" + miss.joinToString("、") {
                     "第 ${it.first + 1} 列第 ${it.second} 排" + if (it in nearCells) "·近阈值" else ""
                 } + "），其中新出现 $newCnt 格；这些格底色有怪，模板没检出$diagTxt")
+                // 0.66 诊断（只记不改决策）：存下漏数那一帧的整屏图（每局前 2 个漏数轮），看这些格里到底是“被墙遮一半的怪”还是别的东西（如结算盖层的字）。
+                leakRounds++; lastLeakRound = roundNo
+                if (leakRounds <= 2) saveBitmap(frame, "leak$leakRounds")
             }
             val out = (0..5).filter { beyondWallBg(frame, it) }
             if (out.isNotEmpty()) {
@@ -896,6 +903,14 @@ object BoardMemory {
         AppLog.i("记忆", "本局记忆：施法 $casts 次，记消 $loggedKills 只（${"%.2f".format(if (casts > 0) loggedKills.toDouble() / casts else 0.0)} 只/次；点击共 $tapCount 次，棋盘对不上而作废 $voidedCasts 次/$voidedKills 只）；" +
             "预测命中 $pred 格，新刷 $predNew 只；预测有而实测无 $vanished 格；近阈值漏数嫌疑 $suspect 格；邻格补认 $adjPromoted 格；" +
             wallMissText() + "期限优先改点 $overrides 次；落空补点 $retries 次")
+        // 0.66 诊断：本局时长 + 贴墙漏数出现在第几轮。真怪被漏会跨轮持续（1→0→-1 排各一轮）、分散在整局里；
+        // 若漏数永远只出现在“倒数第 1~2 轮”，那是终局帧（结算盖层）的假象。
+        run {
+            val secs = if (battleStartMs > 0) (System.currentTimeMillis() - battleStartMs) / 1000.0 else 0.0
+            AppLog.i("记忆", "本局时长 ${"%.0f".format(secs)} 秒（$roundNo 个扫描轮，施法 $casts 次，${"%.1f".format(if (casts > 0) secs / casts else 0.0)} 秒/次）；" +
+                "贴墙漏数出现在 $leakRounds 个扫描轮" +
+                if (leakRounds > 0) "，最后一次在第 $lastLeakRound 轮（本局共 $roundNo 轮，倒数第 ${roundNo - lastLeakRound + 1} 轮）" else "")
+        }
         AppLog.i("记忆", "核实对账：记消 $loggedKills 只；点后核实清掉 $verified 只（只覆盖 $verifiedCasts/$casts 次施法——预测命中不到一半的轮次不核实，所以不能和记消直接相减）；" +
             "上部(排≤4)预测命中 ${if (topTotal > 0) "$topHit/$topTotal" else "—"}；漏数嫌疑 $suspect 格；" + wallMissText().trimEnd('；'))
         val rate = if (cumPredTotal > 0) "%.1f%%".format(100.0 * cumPredHit / cumPredTotal) else "—"
