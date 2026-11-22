@@ -79,6 +79,7 @@ class MainActivity : ComponentActivity() {
         var updateError by remember { mutableStateOf("") }
         var updateChecked by remember { mutableStateOf(false) }
         var loopLimit by remember { mutableStateOf(RuleStore.getLoopLimit(ctx).toString()) }
+        var overlayOn by remember { mutableStateOf(BoardOverlay.isShowing()) }   // 0.67：悬浮迷你棋盘开关
         fun persist() = RuleStore.save(ctx, rules.toList())
 
         // 启动后静默检查一次更新（没网/没新版时什么都不弹）
@@ -169,6 +170,25 @@ class MainActivity : ComponentActivity() {
                         }) { Text("加载守卫城邦内置规则") }
                         Button({ GuardScript.toggle(ctx) }) { Text("一键守卫城邦") }
                         Text("在挑战页点它：自动进场→免费（没次数就点钻石×100）→关介绍→点颜色辅助→开跑一局", style = MaterialTheme.typography.bodySmall)
+                        // 0.67 悬浮迷你棋盘：仿 PC 辅助 3.0 的棋盘窗，实时显示 bot 认到的棋盘、红叉标要点的伙。
+                        // 默认在左上角墙上（棋盘区域之外），别拖到棋盘上——悬浮窗会进截屏，盖住棋盘会让识别全乱。
+                        Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                            Button({
+                                if (BoardOverlay.isShowing()) {
+                                    BoardOverlay.hide(); overlayOn = false
+                                    Toast.makeText(ctx, "悬浮棋盘已关", Toast.LENGTH_SHORT).show()
+                                } else if (!Settings.canDrawOverlays(ctx)) {
+                                    ctx.startActivity(Intent(Settings.ACTION_MANAGE_OVERLAY_PERMISSION, Uri.parse("package:${ctx.packageName}")))
+                                    Toast.makeText(ctx, "先授权悬浮窗，回来再点一次", Toast.LENGTH_LONG).show()
+                                } else if (BoardOverlay.show(ctx)) {
+                                    overlayOn = true
+                                    Toast.makeText(ctx, "悬浮棋盘已开（默认在左上角墙上，别拖到棋盘上）", Toast.LENGTH_LONG).show()
+                                } else {
+                                    Toast.makeText(ctx, "悬浮窗没开起来", Toast.LENGTH_SHORT).show()
+                                }
+                            }) { Text(if (overlayOn) "悬浮棋盘：关" else "悬浮棋盘：开") }
+                            Text("实时显示 bot 认到的棋盘，红叉=这轮要点的伙", style = MaterialTheme.typography.bodySmall)
+                        }
                         OutlinedButton({
                             val dir = ctx.getExternalFilesDir(null)
                             val latest = dir?.listFiles { f -> f.name.startsWith("settle_title_") && f.name.endsWith(".png") }

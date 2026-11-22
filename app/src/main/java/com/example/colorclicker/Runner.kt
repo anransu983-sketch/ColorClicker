@@ -131,6 +131,7 @@ object Runner {
     fun stop() {
         if (isRunning()) AppLog.i("服务", "运行已停止")
         job?.cancel(); job = null
+        BoardOverlayState.post(BoardSnapshot(running = false))   // 0.67：悬浮棋盘显示“未运行”
     }
 
     private fun cacheKey(path: String) = path + "#" + File(path).lastModified()
@@ -336,6 +337,7 @@ object Runner {
             } finally {
                 deathReport()
                 BoardMemory.endBattle(ctx)
+                BoardOverlayState.post(BoardSnapshot(running = false))   // 0.67：悬浮棋盘显示“未运行”
             }
         }
     }
@@ -626,6 +628,7 @@ object Runner {
         if (all.isEmpty()) {
             AppLog.d("匹配", "$summary → 都没找到$verified")
             BoardMemory.onZeroBoard()   // 0.45：整盘全零（清完这一波 / 结算屏），待确认的点击按已发生算
+            BoardOverlayState.post(BoardSnapshot(running = true))   // 0.67：悬浮棋盘清盘
             // 点过之后第一次整盘全零：要么这一波清完了，要么战斗结束。存一张整屏图当凭证（每局最多 3 张）
             if (!zeroShotDone && lastTapAt > 0 && zeroShots < 3) {
                 zeroShotDone = true; zeroShots++
@@ -824,6 +827,21 @@ object Runner {
         val near = scans.flatMap { s -> s.near.map { s.rule.name to it } }
         val diagTpls = clusterRules.mapIndexedNotNull { i, r -> tpls[i]?.let { r.name to it } }
         BoardMemory.onRound(compsAll, pick.comp, pick.rule.name, frame, near, diagTpls)?.let { AppLog.d("记忆", it) }
+        // 0.67 悬浮迷你棋盘：每轮把认到的棋盘＋要点的伙发给悬浮窗（只显示，不改决策）。
+        BoardOverlayState.post(
+            BoardSnapshot(
+                cells = all.flatMap { cand ->
+                    cand.comp.cells.ifEmpty { listOf(cand.comp.point) }.map { p ->
+                        BoardCell(colOf(p.x), rowOf(p.y), cand.rule.name)
+                    }
+                },
+                pickCells = pick.comp.cells.ifEmpty { listOf(pick.comp.point) }
+                    .map { Pair(colOf(it.x), rowOf(it.y)) }.toSet(),
+                pickName = pick.rule.name,
+                pickCount = pick.comp.size,
+                running = true
+            )
+        )
         pendingBoardSig = roundSig
         pickDecidedAt = System.currentTimeMillis()
         return ClusterPick(pick.rule, pick.comp.point, pick.comp.score, pick.comp.size, pick.comp.cells.ifEmpty { listOf(pick.comp.point) })
