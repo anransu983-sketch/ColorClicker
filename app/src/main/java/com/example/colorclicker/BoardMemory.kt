@@ -24,6 +24,12 @@ import kotlin.math.sqrt
  *  8. 0.47：半截帧检测 unshiftedMatch（点后第一帧伙已消、整盘还没上移），Runner 据此等上移再扫。
  *  7. 0.45b：整帧盖层检测 frameVeil（发白 / 压暗），盖层帧按不连续帧处理。
  *     另：漏数伙作为“幽灵伙”进期限余量（见 ghostComps），代点只认含 -1 排格的伙。
+ *  10. 0.51：记忆学习回流（39 局数据不再只记数）。① 漏检记分跨局存盘：auditWall 逐格诊断里底色确认有怪、
+ *     最佳分低于阈值的格子，按类型记漏检分桶（0.05 一档；同一档出现 ≥2 次才算数；只记 0/1 排整格，
+ *     -1 排半遮怪不算——0.41 已证 -1 排怪原生分 0.336–0.591 是长相问题）；② 各类型有效阈值按漏检证据自动下调：
+ *     新阈值 = max(0.56, min(基准, 最低有证档位分 − 0.02))，只降不升，下限 0.56（0.32 实测空盘噪声 ≤0.53）；
+ *     ③ 整伙落空补点：总落空诊断（整伙原位仍在、一格没清）记下那伙，下轮若它还在盘上（上移一格后）且已到
+ *     0 排及上，优先补点它一次，不再白白丢一轮。
  *  数据存在 filesDir/guard_memory.json。 */
 object BoardMemory {
     private const val COL0_X = 117
@@ -113,6 +119,78 @@ object BoardMemory {
     private val typeStats = HashMap<String, TypeStat>()
     private var loaded = false
 
+    // ───────────── 0.51 漏检记分（跨局存盘）+ 落空补点 ─────────────
+    /** 每种怪的漏检分桶：key = 分数×20 的档位（如 0.66→13），value = 该档出现次数。
+     *  只记底色确认有怪、最佳分低于基准阈值、且第一名比第二名高 ≥0.10 的格子；只记 0/1 排。 */
+    private val leakBuckets = HashMap<String, MutableMap<Int, Int>>()
+    /** 各类型按漏检证据算出的有效阈值上限（只降不升）。重建新 map 再发布，读侧无锁安全。 */
+    @Volatile private var adaptiveCaps: Map<String, Double> = emptyMap()
+    private var missedCells: List<Cell> = emptyList()   // 0.51：上轮整伙落空的那伙（带类型），下轮优先补点
+    private var retries = 0                              // 0.51：本局落空补点次数
+    private var cumRetries = 0                           // 0.51：跨局累计落空补点次数
+    /** 0.51：漏检自适应下限——空盘噪声实测 ≤0.53，阈值再低会把空地认成怪。 */
+    private const val ADAPT_FLOOR = 0.56
+
+    /** 0.51：各类型基准阈值（从 Runner.effThr 搬来，同一张表）。依据：0.19–0.22 相似度累计 +
+     *  每局 1–3 次“漏数嫌疑”；0.32 各降 0.02 吃分布尾巴，空盘噪声约 0.26–0.53；
+     *  0.41 土豆 0.72→0.68（0/1 排漏掉的土豆原生分 0.702–0.708，-1 排 0.336–0.591 是长相问题不动）；
+     *  0.42 野猪 0.8（同排土豆/蝎子对野猪模板 0.706–0.707，0.76 余量只有 0.05）。 */
+    fun baseThr(name: String): Double = when {
+        name.contains("蛇") -> 0.62
+        name.contains("树") -> 0.64
+        name.contains("野猪") -> 0.8
+        name.contains("土豆") -> 0.68
+        else -> 0.76
+    }
+
+    /** 0.51：某类型的有效阈值 = min(传进来的基准，自适应上限）。没证据时返回基准。 */
+    fun adaptiveThr(name: String, base: Double): Double = adaptiveCaps[name]?.coerceAtMost(base) ?: base
+
+    fun leakCount(name: String): Int = leakBuckets[name]?.values?.sum() ?: 0
+
+    /** 0.51：记一次漏检证据（auditWall 逐格诊断调）。只收 0/1 排、最佳分低于基准、第一名比第二名高 ≥0.10。
+     *  同一档位第 2 次出现、且上限因此变动时打一行日志。 */
+    private fun noteLeak(type: String, row: Int, best: Double, second: Double) {
+        if (row < 0) return
+        val base = baseThr(type)
+        if (best >= base) return
+        if (best - second < 0.10) return
+        val buckets = leakBuckets.getOrPut(type) { HashMap() }
+        val bucket = (best * 20).toInt()
+        buckets[bucket] = (buckets[bucket] ?: 0) + 1
+        val before = adaptiveCaps[type] ?: base
+        refreshAdaptiveCaps()
+        val after = adaptiveCaps[type] ?: base
+        if (after < before - 0.001) {
+            AppLog.i("记忆", "「${type.removePrefix("守卫-")}」累计漏检 ${leakCount(type)} 次、最低有证档 ${"%.2f".format(bucket / 20.0)}，阈值 ${"%.2f".format(before)}→${"%.2f".format(after)}（按漏检数据自动下调，只降不升，下限 $ADAPT_FLOOR）")
+        }
+    }
+
+    /** 0.51：按漏检分桶重算各类型自适应上限（只降不升：已降过的取更低值，没新证据的类型保持旧上限）。 */
+    private fun refreshAdaptiveCaps() {
+        val next = HashMap<String, Double>()
+        for ((type, buckets) in leakBuckets) {
+            val bucket = buckets.entries.filter { it.value >= 2 }.minOfOrNull { it.key } ?: continue
+            val cap = maxOf(ADAPT_FLOOR, minOf(baseThr(type), bucket / 20.0 - 0.02))
+            val old = adaptiveCaps[type] ?: baseThr(type)
+            next[type] = minOf(old, cap)
+        }
+        for ((type, cap) in adaptiveCaps) if (type !in next) next[type] = cap
+        adaptiveCaps = next
+    }
+
+    /** 0.51：记下整伙落空的那伙（总落空诊断处调），下轮优先补点。 */
+    fun noteTotalMiss(cells: List<Cell>) { missedCells = cells.toList() }
+
+    /** 0.51：Runner 取走落空伙（取后清空，一轮有效）。 */
+    fun takeMissedCells(): List<Cell> {
+        val m = missedCells
+        missedCells = emptyList()
+        return m
+    }
+
+    fun noteRetry() { retries++ }
+
     // ───────────── 0.38 贴墙漏数日志（只记不改决策）─────────────
     // 空地 = 沙漠底（229,172,105），不是“素色深色”；有怪的格子才按类型染底色。结算屏把整盘压暗，但色度（各通道占三通道和的比例）不变，
     // 所以一律用色度比，不用亮度：空地色度 ≈ (0.452,0.340,0.208)。
@@ -151,6 +229,7 @@ object BoardMemory {
         casts = 0; loggedKills = 0; roundNo = 0; dumps = 0
         tapCount = 0; pendingKills = 0; pendingCasts = 0; voidedCasts = 0; voidedKills = 0; verifiedCasts = 0; discMiss = 0; lastVeil = 0; prevActual = emptyList()
         wallMiss = 0; wallMissNew = 0; outMiss = 0; prevMiss = emptySet(); prevMissBest = emptyMap()
+        missedCells = emptyList(); retries = 0   // 0.51：落空伙与补点计数按局清；漏检分桶与自适应上限跨局保留
         refLogged = false; assistOffLogged = false; assistOffBattle = false
     }
 
@@ -294,7 +373,8 @@ object BoardMemory {
                 // 选点那轮预测命中 ≈ 0（新刷 ≈ 预测只数）= 前者；接近满 = 后者。再看选点→点击耗时、距上次点击多久。
                 if (surv == lastPicked.size && gone.isEmpty()) {
                     val pr = if (pickRoundHit < 0) "没校验" else "$pickRoundHit/$pickRoundTotal"
-                    AppLog.w("记忆", "总落空诊断：选点那轮预测命中 $pr（≈0=选点帧是半截帧、闸门漏判；接近满=选点帧已上移完），选点→点击 ${if (tapScanMs < 0) "—" else "${tapScanMs}ms"}，距上次点击 ${if (tapSincePrevMs < 0) "—" else "${tapSincePrevMs}ms"}")
+                    noteTotalMiss(lastPicked)   // 0.51：整伙落空，记下这伙，下轮优先补点
+                    AppLog.w("记忆", "总落空诊断：选点那轮预测命中 $pr（≈0=选点帧是半截帧、闸门漏判；接近满=选点帧已上移完），选点→点击 ${if (tapScanMs < 0) "—" else "${tapScanMs}ms"}，距上次点击 ${if (tapSincePrevMs < 0) "—" else "${tapSincePrevMs}ms"}；已记下这伙，下轮优先补点")
                 }
             } else if (lastPicked.isNotEmpty()) {
                 AppLog.d("记忆", "点后核实作废：预测命中 $hit/${predicted.size} 太低，棋盘没按预期动")
@@ -524,6 +604,12 @@ object BoardMemory {
                 } else emptyMap()
                 // 0.44：把每格的最佳分（第一名）存下来，下一轮代点选落点用（见 missBestScore）。
                 prevMissBest = diag.mapValues { (_, top) -> top.maxOfOrNull { it.second } ?: 0.0 }
+                // 0.51：漏检记分——逐格诊断的第一名就是“底色确认有怪、模板没检出”的实测分，跨局攒起来回流阈值。
+                // 只记 0/1 排（-1 排半遮怪的低分是长相问题，0.41 已证）；第一名须比第二名高 ≥0.10 才认类型。
+                for ((cell, top) in diag) {
+                    if (cell.second < 0 || top.isEmpty()) continue
+                    noteLeak(top[0].first, cell.second, top[0].second, top.getOrNull(1)?.second ?: 0.0)
+                }
                 val diagTxt = if (diag.isEmpty()) "" else "；逐格最佳分：" + diag.entries.joinToString("；") { (cell, top) ->
                     "第 ${cell.first + 1} 列第 ${cell.second} 排→" + if (top.isEmpty()) "无响应" else top.joinToString("/") { "${it.first.removePrefix("守卫-")}${"%.3f".format(it.second)}" }
                 }
@@ -705,13 +791,14 @@ object BoardMemory {
         cumPredHit += predHit; cumPredTotal += predTotal; cumVanished += vanished; cumSuspect += suspect
         cumVerified += verified; cumTopHit += topHit; cumTopTotal += topTotal
         cumOverrides += overrides
+        cumRetries += retries
         cumCasts += casts; cumKills += loggedKills
         cumWallMiss += wallMiss; cumWallMissNew += wallMissNew; cumOutMiss += outMiss
         save(ctx)
         val pred = if (predTotal > 0) "$predHit/$predTotal" else "—"
         AppLog.i("记忆", "本局记忆：施法 $casts 次，记消 $loggedKills 只（${"%.2f".format(if (casts > 0) loggedKills.toDouble() / casts else 0.0)} 只/次；点击共 $tapCount 次，棋盘对不上而作废 $voidedCasts 次/$voidedKills 只）；" +
             "预测命中 $pred 格，新刷 $predNew 只；预测有而实测无 $vanished 格；近阈值漏数嫌疑 $suspect 格；" +
-            wallMissText() + "期限优先改点 $overrides 次")
+            wallMissText() + "期限优先改点 $overrides 次；落空补点 $retries 次")
         AppLog.i("记忆", "核实对账：记消 $loggedKills 只；点后核实清掉 $verified 只（只覆盖 $verifiedCasts/$casts 次施法——预测命中不到一半的轮次不核实，所以不能和记消直接相减）；" +
             "上部(排≤4)预测命中 ${if (topTotal > 0) "$topHit/$topTotal" else "—"}；漏数嫌疑 $suspect 格；" + wallMissText().trimEnd('；'))
         val rate = if (cumPredTotal > 0) "%.1f%%".format(100.0 * cumPredHit / cumPredTotal) else "—"
@@ -721,7 +808,11 @@ object BoardMemory {
             .joinToString(" ") { "${it.key.removePrefix("守卫-")}出现${it.value.n}次均${"%.2f".format(it.value.avg)}最低${"%.2f".format(it.value.min)}" }
         AppLog.i("记忆", "相似度累计：$sim")
         for ((name, s) in typeStats) {
-            if (s.min < 0.68) AppLog.w("记忆", "「${name.removePrefix("守卫-")}」相似度最低到 ${"%.3f".format(s.min)}（均值 ${"%.2f".format(s.avg)}），阈值可能要下调，下局留意")
+            if (s.min < 0.68) {
+                val cap = adaptiveCaps[name]
+                if (cap != null) AppLog.i("记忆", "「${name.removePrefix("守卫-")}」相似度最低到 ${"%.3f".format(s.min)}（均值 ${"%.2f".format(s.avg)}），阈值已按累计漏检自动调到 ${"%.2f".format(cap)}")
+                else AppLog.w("记忆", "「${name.removePrefix("守卫-")}」相似度最低到 ${"%.3f".format(s.min)}（均值 ${"%.2f".format(s.avg)}），阈值可能要下调，下局留意")
+            }
         }
         predicted = emptyList()
     }
@@ -743,6 +834,13 @@ object BoardMemory {
         sb.append("点后核实清掉 $cumVerified 只，预测有而实测无 $cumVanished 格，漏数嫌疑 $cumSuspect 格\n")
         sb.append("贴墙漏数 $cumWallMiss 格·轮（约 $cumWallMissNew 只），贴墙外 $cumOutMiss 格\n")
         sb.append("期限优先改点 $cumOverrides 次\n")
+        if (cumRetries > 0) sb.append("落空补点 $cumRetries 次\n")
+        val leaks = leakBuckets.entries.sortedBy { it.key }
+            .joinToString("\n") { (k, _) ->
+                val n = leakCount(k); val cap = adaptiveThr(k, baseThr(k)); val base = baseThr(k)
+                "「${k.removePrefix("守卫-")}」漏检 $n 次" + if (cap < base - 0.001) "，阈值 ${"%.2f".format(base)}→${"%.2f".format(cap)}" else "，阈值未动（证据不足：同一档需出现 2 次）"
+            }
+        if (leaks.isNotEmpty()) sb.append("漏检回补（按漏检数据自动下调阈值，只降不升，下限 $ADAPT_FLOOR）：\n$leaks\n")
         val sim = typeStats.entries.sortedBy { it.key }
             .joinToString("\n") { "「${it.key.removePrefix("守卫-")}」出现 ${it.value.n} 次，均值 ${"%.2f".format(it.value.avg)}，最低 ${"%.2f".format(it.value.min)}" }
         if (sim.isNotEmpty()) sb.append("相似度累计：\n$sim")
@@ -766,6 +864,21 @@ object BoardMemory {
             cumDivGain = j.optDouble("cumDivGain", 0.0)
             cumCasts = j.optInt("cumCasts"); cumKills = j.optInt("cumKills")
             cumWallMiss = j.optInt("cumWallMiss"); cumWallMissNew = j.optInt("cumWallMissNew"); cumOutMiss = j.optInt("cumOutMiss")
+            cumRetries = j.optInt("cumRetries")
+            val leaks = j.optJSONObject("leaks")
+            if (leaks != null) {
+                for (k in leaks.keys()) {
+                    val o = leaks.getJSONObject(k)
+                    val buckets = HashMap<Int, Int>()
+                    val bj = o.optJSONObject("buckets")
+                    if (bj != null) for (bk in bj.keys()) {
+                        val bi = bk.toIntOrNull() ?: continue
+                        buckets[bi] = bj.optInt(bk)
+                    }
+                    leakBuckets[k] = buckets
+                }
+                refreshAdaptiveCaps()
+            }
             val types = j.optJSONObject("types") ?: return
             for (k in types.keys()) {
                 val o = types.getJSONObject(k)
@@ -784,13 +897,19 @@ object BoardMemory {
                     put("n", s.n); put("sum", s.sum); put("min", s.min); put("max", s.max)
                 })
             }
+            val leaks = JSONObject()
+            for ((k, buckets) in leakBuckets) {
+                val bj = JSONObject()
+                for ((b, n) in buckets) bj.put(b.toString(), n)
+                leaks.put(k, JSONObject().apply { put("buckets", bj) })
+            }
             memFile(ctx).writeText(JSONObject().apply {
-                put("battles", battles); put("types", types)
+                put("battles", battles); put("types", types); put("leaks", leaks)
                 put("cumPredHit", cumPredHit); put("cumPredTotal", cumPredTotal)
                 put("cumVanished", cumVanished); put("cumSuspect", cumSuspect)
                 put("cumVerified", cumVerified); put("cumTopHit", cumTopHit); put("cumTopTotal", cumTopTotal)
                 put("cumOverrides", cumOverrides); put("cumDivN", cumDivN); put("cumDivGain", cumDivGain)
-                put("cumCasts", cumCasts); put("cumKills", cumKills)
+                put("cumCasts", cumCasts); put("cumKills", cumKills); put("cumRetries", cumRetries)
                 put("cumWallMiss", cumWallMiss); put("cumWallMissNew", cumWallMissNew); put("cumOutMiss", cumOutMiss)
             }.toString())
         } catch (e: Exception) {

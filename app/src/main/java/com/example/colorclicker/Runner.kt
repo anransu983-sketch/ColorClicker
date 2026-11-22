@@ -24,24 +24,12 @@ object Runner {
     private const val SETTLE_TRIES = 8
     private const val SETTLE_FRAC = 0.02
 
-    /** 0.23 有效阈值 = min(规则阈值, 下面的数)，按规则名含的字匹配（她不用调）。
-     *  依据：0.19–0.22 相似度累计（蛇均0.93最低0.71、树均0.91最低0.77、土豆均0.95最低0.78、蝎子最低0.81）
-     *  + 每局 1–3 次“漏数嫌疑”（点掉那伙旁边的同类怪只比阈值低一点点被漏数）。放低必须配合跨类去重（见 resolveConflicts），否则会认错怪。 */
-    // 0.32：14 局累计最低相似度贴着 cap 走（蛇 0.645/cap 0.64、树 0.672/cap 0.66），
-    // 各降 0.02 吃掉分布尾巴；空盘噪声约 0.26–0.53，离 0.62 还远
+    /** 0.23 有效阈值 = min(规则阈值, 基准上限)，按规则名含的字匹配（她不用调）。
+     *  基准表在 BoardMemory.baseThr（0.32/0.41/0.42 的依据见那里）；0.51 起再按跨局漏检证据自动下调
+     *  （BoardMemory.adaptiveThr），只降不升，下限 0.56（空盘噪声实测 ≤0.53）。 */
     private fun effThr(r: Rule): Double {
-        val cap = when {
-            r.name.contains("蛇") -> 0.62
-            r.name.contains("树") -> 0.64
-            // 0.41：土豆 0.72→0.68——30 局墙边诊断：0/1 排漏掉的土豆原生分 0.702–0.708（6 格三轮复现，第二名 ≤0.28），
-            // 就卡在阈值下面一点点；空板噪声底 ≤0.53，0.68 仍有余量。−1 排（0.336–0.591）是长相问题，降阈值救不了，不动它。
-            // 0.42：野猪 0.8——原生图 NCC：三只野猪互认 0.994–1.000，真野猪 0.99 随便够；但同排土豆/蝎子
-            // 对野猪模板 0.706–0.707（底排暗红底色拉高），0.76 的默认 cap 余量只有 0.05，定 0.8 压住误认
-            r.name.contains("野猪") -> 0.8
-            r.name.contains("土豆") -> 0.68
-            else -> 0.76
-        }
-        return minOf(r.threshold, cap)
+        val cap = BoardMemory.baseThr(r.name)
+        return minOf(r.threshold, BoardMemory.adaptiveThr(r.name, cap))
     }
 
     // ───────── 0.23 滑动帧闸门 ─────────
@@ -637,6 +625,31 @@ object Runner {
                 AppLog.d("最优解", "最优解和期限规则一致，点「${pickEv.cand.rule.name}」${pickEv.cand.comp.size}只，两步值${solverEval.twoStep}")
             }
         }
+        // 0.51 落空补点：上轮整伙原位仍在、一格没清（总落空诊断已记下那伙）。这轮若它还在盘上
+        // （上移一格后，行号 −1；没上移也认），且已到 0 排及上（再不点就撞墙），优先补点它一次，
+        // 不走求解器——那一轮已经白丢了，别再让同一伙白白越线。找不到就当它已散伙，不追。
+        var retryFired = false
+        val missed = BoardMemory.takeMissedCells()
+        if (missed.isNotEmpty()) {
+            val missedType = missed.first().type
+            val pts = missed.flatMap { listOf(BoardMemory.cellCenter(it.col, it.row - 1), BoardMemory.cellCenter(it.col, it.row)) }.toSet()
+            val retryCand = all.firstOrNull { it.rule.name == missedType && it.comp.cells.any { p -> p in pts } }
+            if (retryCand != null && BoardMemory.minRowOf(retryCand.comp) <= 0) {
+                val retryEv = evs.first { it.cand.comp === retryCand.comp }
+                if (retryEv.cand.comp !== pickEv.cand.comp) {
+                    AppLog.w("匹配", "落空补点：上轮「${missedType.removePrefix("守卫-")}」${missed.size}只整伙没打中，这轮它还在（第${BoardMemory.minRowOf(retryCand.comp)}排），优先补点它（本来要点「${pickEv.cand.rule.name.removePrefix("守卫-")}」${pickEv.cand.comp.size}只）")
+                } else {
+                    AppLog.d("匹配", "落空补点：上轮落空的「${missedType.removePrefix("守卫-")}」${missed.size}只这轮正好就是首选，照常点它")
+                }
+                pickEv = retryEv
+                retryFired = true
+                BoardMemory.noteRetry()
+            } else if (retryCand == null) {
+                AppLog.d("匹配", "落空补点取消：上轮落空的「${missedType.removePrefix("守卫-")}」${missed.size}只已不在盘上（散伙/被清），按正常决策")
+            } else {
+                AppLog.d("匹配", "落空补点暂缓：上轮落空的「${missedType.removePrefix("守卫-")}」${missed.size}只还在第${BoardMemory.minRowOf(retryCand.comp)}排，不够急，按正常决策")
+            }
+        }
         // 0.44 贴墙漏数代点（按伙）：上一轮漏数映射到当前排后按上下左右相邻成伙，选最大的一伙；
         // 落点取伙内 -1 排最佳分最高的那格（最佳分是 auditWall 逐格诊断的实测分，见 missBestScore；
         // -1 排优先于分数：墙区怪最佳分只有 0.38–0.47，落在空盘噪声带里还常平手，分差说明不了
@@ -659,7 +672,7 @@ object Runner {
         if (fbGroups.isNotEmpty() && detectedAtWall) {
             AppLog.w("匹配", "贴墙漏数伙 ${fbGroups.size} 个含 -1 排格，但已识别的伙里也有 -1 排的：一次只能清一伙，点谁都有一伙越线，保留已识别的伙（漏数格：${fbGroups.first().joinToString("、") { "第 ${it.first + 1} 列第 ${it.second} 排" }}）")
         }
-        if (fbGroups.isNotEmpty() && !detectedAtWall) {
+        if (fbGroups.isNotEmpty() && !detectedAtWall && !retryFired) {
             origPickDesc = "${pickEv.cand.rule.name.removePrefix("守卫-")}${pickEv.cand.comp.size}只（第${BoardMemory.minRowOf(pickEv.cand.comp)}排，${hzText(pickEv.hz)}）"
             val group = fbGroups.first()
             wallFallbackGroup = group
