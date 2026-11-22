@@ -407,6 +407,90 @@ object Runner {
         return bad
     }
 
+    // ───────── 0.57 邻格补认 ─────────
+    /** 总开关：false = 整段关掉，回到 0.56 的行为。 */
+    private const val ADJ_PROMOTE = true
+    /** 候选格底色与同伙已认出成员底色的色度距离上限。实测（亮帧）同种怪底色散布 ≤0.015，不同种 ≥0.18（最近的蝎子/蛇 0.051），取 0.03。 */
+    private const val ADJ_TINT_TOL = 0.03
+
+    private fun latticeBiasOf(name: String): Int {
+        val hist = latticeBias[name] ?: return 0
+        return if (hist.size >= 10) hist.sorted()[hist.size / 2] else 0
+    }
+
+    /** 0.57 邻格补认：某规则 X 已认出一伙，旁边（上下左右）有一格 X 的模板分落在近阈值窗里（Matcher.Near，
+     *  即 [阈值−0.08, 阈值)），而且这格底色和 X 已认出成员的底色一致（色度距离 ≤ ADJ_TINT_TOL），
+     *  就把它并入那一伙；新并入的格再当邻居，递归。几道闸：
+     *   ① 只用 findBoardComponents 已经算好的 near，不额外跑模板匹配；
+     *   ② 邻接：必须贴着 X 已认出（或已并入）的格；
+     *   ③ 底色：取这一帧里 X 成员自己的底色当参照（不用学习值，压暗/发白帧也不受影响；发白/压暗盖层帧整段跳过）。
+     *      格子本身没染色（颜色辅助没开 / 空地）= 不并；
+     *   ④ 别的规则在同一格的近阈值分 ≥ X 的 = 不并（第一名不是 X）；
+     *   ⑤ 已被任何规则认走的格不动。
+     *  并入格的坐标取格中心 + 该规则学到的 y 偏差（和滑动闸门同口径，不会因为近阈值峰位置漂而触发闸门）。 */
+    private fun promoteNear(frame: Bitmap, scans: List<RuleScan>): List<RuleScan> {
+        if (!ADJ_PROMOTE || scans.none { it.comps.isNotEmpty() && it.near.isNotEmpty() }) return scans
+        if (BoardMemory.frameVeiled(frame)) return scans
+        val taken = HashSet<Pair<Int, Int>>()
+        for (s in scans) for (c in s.comps) for (p in c.cells.ifEmpty { listOf(c.point) }) taken.add(Pair(colOf(p.x), rowOf(p.y)))
+        val nearAt = HashMap<Pair<Int, Int>, ArrayList<Pair<String, Double>>>()
+        for (s in scans) for (n in s.near) nearAt.getOrPut(Pair(colOf(n.x), rowOf(n.y))) { ArrayList() }.add(Pair(s.rule.name, n.score))
+        var total = 0
+        val out = scans.map { s ->
+            if (s.comps.isEmpty() || s.near.isEmpty()) return@map s
+            // 0.57 修正（助手核验 Claude 补丁时改）：下限就是近阈值窗的下沿，不再另取 max(0.56, …)——
+            // max(0.56, …) 会让史莱姆的窗变空（史莱姆阈值就是 0.56，near 全 < 0.56），而史莱姆正是漏检最多的类型；
+            // 空地由底色闸挡（cellTint 为 null = 不并），分数下限不必再替它把关。
+            val floor = effThr(s.rule) - 0.08
+            val pts = ArrayList<Point>()
+            val scs = ArrayList<Double>()
+            val members = HashSet<Pair<Int, Int>>()
+            for (c in s.comps) {
+                val cs = c.cells.ifEmpty { listOf(c.point) }
+                for ((k, p) in cs.withIndex()) {
+                    pts.add(p); scs.add(c.scores.getOrNull(k) ?: c.score); members.add(Pair(colOf(p.x), rowOf(p.y)))
+                }
+            }
+            val tints = members.mapNotNull { (c, r) -> BoardMemory.cellTint(frame, c, r) }
+            if (tints.isEmpty()) return@map s
+            val ref = DoubleArray(3) { k -> tints.map { it[k] }.sorted()[tints.size / 2] }
+            val cand = HashMap<Pair<Int, Int>, Double>()
+            for (n in s.near) {
+                val cell = Pair(colOf(n.x), rowOf(n.y))
+                if (n.score < floor || cell in taken || cell.second < -1 || cell.second > 6) continue
+                if (nearAt[cell].orEmpty().any { it.first != s.rule.name && it.second >= n.score }) continue
+                if (n.score > (cand[cell] ?: 0.0)) cand[cell] = n.score
+            }
+            if (cand.isEmpty()) return@map s
+            val tintDistOf = HashMap<Pair<Int, Int>, Double>()   // 每格只取一次底色；没染色 = 无穷大
+            val added = ArrayList<Triple<Pair<Int, Int>, Double, Double>>()   // (格, 模板分, 底色距离)
+            var grew = true
+            while (grew) {
+                grew = false
+                for ((cell, sc) in cand.entries.toList()) {
+                    if (cell in members) continue
+                    if (members.none { Math.abs(it.first - cell.first) + Math.abs(it.second - cell.second) == 1 }) continue
+                    val d = tintDistOf.getOrPut(cell) {
+                        val t = BoardMemory.cellTint(frame, cell.first, cell.second)
+                        if (t == null) Double.MAX_VALUE else BoardMemory.tintDist(t, ref)
+                    }
+                    if (d > ADJ_TINT_TOL) continue
+                    members.add(cell); added.add(Triple(cell, sc, d)); cand.remove(cell); grew = true
+                }
+            }
+            if (added.isEmpty()) return@map s
+            for ((cell, sc, d) in added) {
+                val base = BoardMemory.cellCenter(cell.first, cell.second)
+                pts.add(Point(base.x, base.y + latticeBiasOf(s.rule.name))); scs.add(sc)
+                AppLog.w("匹配", "邻格补认：「${s.rule.name.removePrefix("守卫-")}」第 ${cell.first + 1} 列第 ${cell.second} 排（模板分 ${"%.3f".format(sc)} < 阈值 ${"%.2f".format(effThr(s.rule))}，贴着同类已认出的怪、底色距离 ${"%.3f".format(d)} ≤ $ADJ_TINT_TOL）并入伙")
+            }
+            total += added.size
+            s.copy(comps = Matcher.regroup(pts, scs))
+        }
+        if (total > 0) BoardMemory.noteAdjPromoted(total)
+        return out
+    }
+
     /** 跨类去重：同一位置（±90px）被两条规则都认出时只留相似度高的那个，再按剩下的格重新连片。
      *  放低蛇/树/土豆阈值后，别类怪偶尔会以低分“认”成它们，这一步挡掉。 */
     private fun resolveConflicts(scans: List<RuleScan>): List<RuleScan> {
@@ -521,6 +605,7 @@ object Runner {
             scans = legacy
         }
         scans = resolveConflicts(scans)
+        scans = promoteNear(frame, scans)   // 0.57 邻格补认：近阈值格贴着同类已认出的怪、底色一致 → 并入那一伙
         val t2 = System.nanoTime()
 
         val all = ArrayList<Cand>()
@@ -670,7 +755,12 @@ object Runner {
             .map { (_, c) -> c.cells.map { Pair(colOf(it.x), rowOf(it.y)) } }
             .sortedByDescending { it.size }
         if (fbGroups.isNotEmpty() && detectedAtWall) {
-            AppLog.w("匹配", "贴墙漏数伙 ${fbGroups.size} 个含 -1 排格，但已识别的伙里也有 -1 排的：一次只能清一伙，点谁都有一伙越线，保留已识别的伙（漏数格：${fbGroups.first().joinToString("、") { "第 ${it.first + 1} 列第 ${it.second} 排" }}）")
+            // 0.57：只记不改决策——存下“漏数伙 vs 已识别伙”的只数对照，攒证据看漏数伙什么时候会比实点的伙大。
+            // 漏数伙只数口径：类型是预测补出来的（漏数-<类型>）= 这么多格是下限；漏数-? = 不同种的格可能连在一起，是上限。
+            val ghostCmp = ghosts.filter { BoardMemory.minRowOf(it.second) <= -1 }.maxByOrNull { it.second.size }
+            val ghostCmpTxt = if (ghostCmp == null) "" else "；[对照·不改决策] 漏数伙最大 ${ghostCmp.second.size} 格（${ghostCmp.first.removePrefix("漏数-").removePrefix("守卫-")}，" +
+                (if (ghostCmp.first == "漏数-?") "类型未知=上限" else "有类型=下限") + "），实点 ${pickEv.cand.comp.size} 只"
+            AppLog.w("匹配", "贴墙漏数伙 ${fbGroups.size} 个含 -1 排格，但已识别的伙里也有 -1 排的：一次只能清一伙，点谁都有一伙越线，保留已识别的伙（漏数格：${fbGroups.first().joinToString("、") { "第 ${it.first + 1} 列第 ${it.second} 排" }}）$ghostCmpTxt")
         }
         if (fbGroups.isNotEmpty() && !detectedAtWall && !retryFired) {
             origPickDesc = "${pickEv.cand.rule.name.removePrefix("守卫-")}${pickEv.cand.comp.size}只（第${BoardMemory.minRowOf(pickEv.cand.comp)}排，${hzText(pickEv.hz)}）"

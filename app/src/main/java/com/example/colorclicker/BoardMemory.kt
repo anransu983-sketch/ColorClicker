@@ -127,6 +127,8 @@ object BoardMemory {
     @Volatile private var adaptiveCaps: Map<String, Double> = emptyMap()
     private var missedCells: List<Cell> = emptyList()   // 0.51：上轮整伙落空的那伙（带类型），下轮优先补点
     private var retries = 0                              // 0.51：本局落空补点次数
+    private var adjPromoted = 0                          // 0.57：本局邻格补认并入伙的格数
+    fun noteAdjPromoted(n: Int) { adjPromoted += n }
     private var cumRetries = 0                           // 0.51：跨局累计落空补点次数
     /** 0.51：漏检自适应下限——空盘噪声实测 ≤0.53，阈值再低会把空地认成怪。 */
     private const val ADAPT_FLOOR = 0.56
@@ -232,6 +234,7 @@ object BoardMemory {
         tapCount = 0; pendingKills = 0; pendingCasts = 0; voidedCasts = 0; voidedKills = 0; verifiedCasts = 0; discMiss = 0; lastVeil = 0; prevActual = emptyList()
         wallMiss = 0; wallMissNew = 0; outMiss = 0; prevMiss = emptySet(); prevMissBest = emptyMap()
         missedCells = emptyList(); retries = 0   // 0.51：落空伙与补点计数按局清；漏检分桶与自适应上限跨局保留
+        adjPromoted = 0
         refLogged = false; assistOffLogged = false; assistOffBattle = false
     }
 
@@ -564,6 +567,31 @@ object BoardMemory {
         return non.count { i -> non.all { j -> cdist(ch[i], ch[j]) < SAME_CHROMA } } >= need
     }
 
+    /** 0.57 邻格补认用：第 col 列第 row 排这格的底色色度（取样、一致性判据与 monsterBg 完全相同；
+     *  格子没染色 / 取不全 / 角之间不一致返回 null，即 cellTint(...) != null ⇔ monsterBg(...) == true）。 */
+    fun cellTint(f: Bitmap, col: Int, row: Int): DoubleArray? {
+        if (f.isRecycled) return null
+        try {
+            val cx = COL0_X + col * STEP
+            val cy = ROW0_Y + row * STEP
+            val offs = if (row == -1) listOf(-CORNER to CORNER, CORNER to CORNER)
+                else listOf(-CORNER to -CORNER, CORNER to -CORNER, -CORNER to CORNER, CORNER to CORNER)
+            val need = if (row == -1) 2 else 3
+            val ch = offs.mapNotNull { (dx, dy) -> patch(f, cx + dx, cy + dy) }.map { it.chroma() }
+            if (ch.size < need) return null
+            val non = ch.indices.filter { cdist(ch[it], refChroma) > NOT_SAND }
+            if (non.size < need) return null
+            val ok = non.filter { i -> non.all { j -> cdist(ch[i], ch[j]) < SAME_CHROMA } }
+            if (ok.size < need) return null
+            return DoubleArray(3) { k -> ok.map { ch[it][k] }.sorted()[ok.size / 2] }
+        } catch (e: Exception) {
+            return null
+        }
+    }
+
+    /** 0.57：两个色度的欧氏距离（和 monsterBg 同一口径）。 */
+    fun tintDist(a: DoubleArray, b: DoubleArray): Double = cdist(a, b)
+
     /** 第 -2 排（越过城墙线）：背景是灰蓝砖墙，不能和空地色比，改看饱和度。只取下面两个角，两个都要饱和且色度相近。 */
     private fun beyondWallBg(f: Bitmap, col: Int): Boolean {
         val cx = COL0_X + col * STEP
@@ -842,7 +870,7 @@ object BoardMemory {
         save(ctx)
         val pred = if (predTotal > 0) "$predHit/$predTotal" else "—"
         AppLog.i("记忆", "本局记忆：施法 $casts 次，记消 $loggedKills 只（${"%.2f".format(if (casts > 0) loggedKills.toDouble() / casts else 0.0)} 只/次；点击共 $tapCount 次，棋盘对不上而作废 $voidedCasts 次/$voidedKills 只）；" +
-            "预测命中 $pred 格，新刷 $predNew 只；预测有而实测无 $vanished 格；近阈值漏数嫌疑 $suspect 格；" +
+            "预测命中 $pred 格，新刷 $predNew 只；预测有而实测无 $vanished 格；近阈值漏数嫌疑 $suspect 格；邻格补认 $adjPromoted 格；" +
             wallMissText() + "期限优先改点 $overrides 次；落空补点 $retries 次")
         AppLog.i("记忆", "核实对账：记消 $loggedKills 只；点后核实清掉 $verified 只（只覆盖 $verifiedCasts/$casts 次施法——预测命中不到一半的轮次不核实，所以不能和记消直接相减）；" +
             "上部(排≤4)预测命中 ${if (topTotal > 0) "$topHit/$topTotal" else "—"}；漏数嫌疑 $suspect 格；" + wallMissText().trimEnd('；'))
