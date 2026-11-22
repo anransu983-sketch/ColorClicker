@@ -41,6 +41,24 @@ private fun levelColor(level: String) = when (level) {
     else -> Color.Unspecified
 }
 
+// 0.64：按局分段——Runner 开局打 "===== 第 N 局开始 ====="（tag 守卫），
+// 这里按标记把日志切成段；没标记的旧日志归“未分局”。
+private data class GameSeg(val no: Int, val startMs: Long, val from: Int, val to: Int)
+
+private fun parseGameSegs(lines: List<LogLine>): List<GameSeg> {
+    val starts = lines.mapIndexedNotNull { i, l ->
+        if (l.tag == "守卫" && l.msg.startsWith("===== 第") && "局开始" in l.msg) {
+            val no = Regex("第 (\\d+) 局").find(l.msg)?.groupValues?.getOrNull(1)?.toIntOrNull() ?: 0
+            i to no
+        } else null
+    }
+    if (starts.isEmpty()) return emptyList()
+    return starts.mapIndexed { idx, (from, no) ->
+        val to = if (idx + 1 < starts.size) starts[idx + 1].first else lines.size
+        GameSeg(no, lines[from].time, from, to)
+    }
+}
+
 /** 应用内详细日志页：实时看、按分类/级别筛、清空、分享导出 */
 @Composable
 fun LogScreen(onDismiss: () -> Unit) {
@@ -51,6 +69,10 @@ fun LogScreen(onDismiss: () -> Unit) {
     var autoScroll by remember { mutableStateOf(true) }
     var recentOnly by remember { mutableStateOf(false) }
     var tick by remember { mutableIntStateOf(0) }
+    // 0.64：按局筛选——null=全部对局，-1=未分局，>0=该局开始时间（startMs，日志裁掉后仍唯一）
+    var gameSel by remember { mutableStateOf<Long?>(null) }
+    var gameMenuOpen by remember { mutableStateOf(false) }
+    val segs = remember(AppLog.lines.size) { parseGameSegs(AppLog.lines) }
     val listState = rememberLazyListState()
 
     // 近5分钟开着时每 15 秒重算一次，否则旧日志会一直赖在列表里
@@ -63,12 +85,23 @@ fun LogScreen(onDismiss: () -> Unit) {
         }
     }
 
-    val shown = remember(AppLog.lines.size, tag, onlyErrors, recentOnly, tick) {
+    val shown = remember(AppLog.lines.size, tag, onlyErrors, recentOnly, tick, gameSel, segs) {
         val cutoff = System.currentTimeMillis() - 5 * 60 * 1000
-        AppLog.lines.filter {
+        val selSeg = gameSel?.let { ms -> if (ms < 0) null else segs.find { it.startMs == ms } }
+        AppLog.lines.filterIndexed { i, it ->
             (tag == "全部" || it.tag == tag) && (!onlyErrors || it.level == "ERROR" || it.level == "WARN") &&
-                (!recentOnly || it.time >= cutoff)
+                (!recentOnly || it.time >= cutoff) &&
+                when {
+                    gameSel == null -> true
+                    gameSel == -1L -> segs.isEmpty() || i < segs.first().from
+                    selSeg == null -> true
+                    else -> i in selSeg.from until selSeg.to
+                }
         }
+    }
+
+    LaunchedEffect(segs) {
+        if (gameSel != null && gameSel != -1L && segs.none { it.startMs == gameSel }) gameSel = null
     }
 
     LaunchedEffect(shown.size) {
@@ -89,6 +122,36 @@ fun LogScreen(onDismiss: () -> Unit) {
                     TAGS.forEach { t ->
                         FilterChip(tag == t, { tag = t }, { Text(t) })
                     }
+                }
+                // 0.64：按局筛选——下拉选一局只看那局的日志；分享导出/复制也只导选中的那局。
+                Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    val gameLabel = when {
+                        gameSel == null -> "全部对局"
+                        gameSel == -1L -> "未分局"
+                        else -> segs.find { it.startMs == gameSel }?.let { "第 ${it.no} 局" } ?: "全部对局"
+                    }
+                    ExposedDropdownMenuBox(expanded = gameMenuOpen, onExpandedChange = { gameMenuOpen = it }) {
+                        TextField(
+                            value = gameLabel, onValueChange = {}, readOnly = true,
+                            trailingIcon = { ExposedDropdownMenuDefaults.TrailingIcon(expanded = gameMenuOpen) },
+                            modifier = Modifier.menuAnchor().width(180.dp),
+                            singleLine = true
+                        )
+                        ExposedDropdownMenu(expanded = gameMenuOpen, onDismissRequest = { gameMenuOpen = false }) {
+                            DropdownMenuItem(text = { Text("全部对局") }, onClick = { gameSel = null; gameMenuOpen = false })
+                            if (segs.isNotEmpty()) {
+                                DropdownMenuItem(text = { Text("未分局") }, onClick = { gameSel = -1L; gameMenuOpen = false })
+                                segs.forEach { s ->
+                                    val t = SimpleDateFormat("HH:mm", Locale.getDefault()).format(Date(s.startMs))
+                                    DropdownMenuItem(
+                                        text = { Text("第 ${s.no} 局 · $t（${s.to - s.from} 条）") },
+                                        onClick = { gameSel = s.startMs; gameMenuOpen = false }
+                                    )
+                                }
+                            }
+                        }
+                    }
+                    if (segs.isNotEmpty()) Text("共 ${segs.size} 局有标记", fontSize = 12.sp, color = Color.Gray)
                 }
                 Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(12.dp)) {
                     Row(verticalAlignment = Alignment.CenterVertically) {

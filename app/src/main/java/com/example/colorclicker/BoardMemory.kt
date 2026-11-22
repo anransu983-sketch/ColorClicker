@@ -134,6 +134,21 @@ object BoardMemory {
     /** 0.51：漏检自适应下限——空盘噪声实测 ≤0.53，阈值再低会把空地认成怪。 */
     private const val ADAPT_FLOOR = 0.56
 
+    // ───────────── 0.64 死因学习（跨局存盘）─────────────
+    /** 终局时墙边（行≤0）有怪的列，各记一笔“致死”。key = 列（0-based），value = 次数。 */
+    private val deathCols = HashMap<Int, Int>()
+    /** 一列记够 3 次“致死”才算致死列：求解器算墙压时，该列的怪多算 1 点墙压。 */
+    private const val DEATH_COL_THRESHOLD = 3
+    /** 当前这局是第几局（已打完的局数 + 1），供 Runner 开局打分局标记用。 */
+    fun currentGameNo() = battles + 1
+    /** 该列是不是致死列（终局墙边有怪 ≥3 次）。 */
+    fun isDeadlyCol(col: Int) = (deathCols[col] ?: 0) >= DEATH_COL_THRESHOLD
+    /** 致死列一览（给记忆学习摘要看），空返回 ""。 */
+    fun deathColsText(): String {
+        val deadly = deathCols.entries.filter { it.value >= DEATH_COL_THRESHOLD }.sortedByDescending { it.value }
+        return if (deadly.isEmpty()) "" else deadly.joinToString("、") { "第 ${it.key + 1} 列 ${it.value} 次" }
+    }
+
     /** 0.51：各类型基准阈值（从 Runner.effThr 搬来，同一张表）。依据：0.19–0.22 相似度累计 +
      *  每局 1–3 次“漏数嫌疑”；0.32 各降 0.02 吃分布尾巴，空盘噪声约 0.26–0.53；
      *  0.41 土豆 0.72→0.68（0/1 排漏掉的土豆原生分 0.702–0.708，-1 排 0.336–0.591 是长相问题不动）；
@@ -453,7 +468,10 @@ object BoardMemory {
         val (ends, next) = simulateNext(actual, tapped, tappedName, ghostCells)
         val tappedCells = tapped.cells.ifEmpty { listOf(tapped.point) }
             .map { Cell(tappedName, colOf(it.x), rowOfY(it.y)) }.toSet()
-        val threat = actual.filter { it !in tappedCells }.count { it.row - 1 <= 0 }
+        // 0.64：致死列加权——点完上移后行≤0 的怪是墙压；其中落在致死列（终局墙边有怪 ≥3 次）
+        // 的怪多算 1 点墙压，求解器会更倾向于清掉这些列的怪、少把怪留在这些列的墙边。
+        val threatCells = actual.filter { it !in tappedCells }.filter { it.row - 1 <= 0 }
+        val threat = threatCells.size + threatCells.count { isDeadlyCol(it.col) }
         return Triple(ends, next.toInt(), threat)
     }
 
@@ -862,6 +880,10 @@ object BoardMemory {
             return
         }
         settlePending(true)   // 0.45：最后一次点击没等到下一轮确认（战斗结束）：按已发生算
+        // 0.64：学死因——终局时墙边（行≤0）有怪的列各记一笔“致死”，跨局攒；
+        // prevActual 是最后一轮看到的棋盘；终局已清盘（无墙边怪）时不记。
+        val deadCols = prevActual.filter { it.row <= 0 }.map { it.col }.toSet()
+        for (c in deadCols) deathCols[c] = (deathCols[c] ?: 0) + 1
         battles++
         cumPredHit += predHit; cumPredTotal += predTotal; cumVanished += vanished; cumSuspect += suspect
         cumVerified += verified; cumTopHit += topHit; cumTopTotal += topTotal
@@ -910,6 +932,8 @@ object BoardMemory {
         sb.append("贴墙漏数 $cumWallMiss 格·轮（约 $cumWallMissNew 只），贴墙外 $cumOutMiss 格\n")
         sb.append("期限优先改点 $cumOverrides 次\n")
         if (cumRetries > 0) sb.append("落空补点 $cumRetries 次\n")
+        val dcText = deathColsText()
+        if (dcText.isNotEmpty()) sb.append("致死列（终局墙边有怪的列，求解器已加权避开）：$dcText\n")
         val leaks = leakBuckets.entries.sortedBy { it.key }
             .joinToString("\n") { (k, _) ->
                 val n = leakCount(k); val cap = adaptiveThr(k, baseThr(k)); val base = baseThr(k)
@@ -954,6 +978,11 @@ object BoardMemory {
                 }
                 refreshAdaptiveCaps()
             }
+            val dc = j.optJSONObject("deathCols")
+            if (dc != null) for (k in dc.keys()) {
+                val ci = k.toIntOrNull() ?: continue
+                deathCols[ci] = dc.optInt(k)
+            }
             val types = j.optJSONObject("types") ?: return
             for (k in types.keys()) {
                 val o = types.getJSONObject(k)
@@ -978,8 +1007,10 @@ object BoardMemory {
                 for ((b, n) in buckets) bj.put(b.toString(), n)
                 leaks.put(k, JSONObject().apply { put("buckets", bj) })
             }
+            val dc = JSONObject()
+            for ((c, n) in deathCols) dc.put(c.toString(), n)
             memFile(ctx).writeText(JSONObject().apply {
-                put("battles", battles); put("types", types); put("leaks", leaks)
+                put("battles", battles); put("types", types); put("leaks", leaks); put("deathCols", dc)
                 put("cumPredHit", cumPredHit); put("cumPredTotal", cumPredTotal)
                 put("cumVanished", cumVanished); put("cumSuspect", cumSuspect)
                 put("cumVerified", cumVerified); put("cumTopHit", cumTopHit); put("cumTopTotal", cumTopTotal)

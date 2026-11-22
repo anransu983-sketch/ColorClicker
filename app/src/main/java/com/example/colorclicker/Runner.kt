@@ -256,6 +256,8 @@ object Runner {
             slideRetries = 0; slidingFlag = false; staleRetries = 0; staleFlag = false; zeroShotDone = false; zeroShots = 0; clearReplay()
             preTapAborts = 0; pickDecidedAt = 0L; settleUnchanged = false
             BoardMemory.beginBattle(ctx)
+            // 0.64：分局标记——每局开局打一行，日志页按这行把日志切成段、按局看。
+            AppLog.i("守卫", "===== 第 ${BoardMemory.currentGameNo()} 局开始 =====")
             var frameLogged = false
             var nullLogged = false
             var clicks = 0
