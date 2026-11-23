@@ -36,6 +36,9 @@ package com.example.colorclicker
  * 下轮最大一伙来自已存活的格子；新刷的怪未知，两边都不算，所以不用折扣。
  */
 object Solver {
+    /** 0.72：最新刷出的那一行（棋盘最下排）。下一次施法后新一行刷在它下面，只有碰到这一行的伙还能被接长。 */
+    private const val BOTTOM_ROW = 6
+
     data class Eval(
         val ruleName: String,
         val comp: Matcher.Comp,
@@ -77,7 +80,12 @@ object Solver {
             safe.isNotEmpty() -> safe
             else -> evals.filter { it.hz != -1 }.ifEmpty { evals }
         }
-        return pool.sortedWith(
+        // 0.72 成长感知延后：棋盘没有重力、洞不补，已有的怪之间的相邻关系不会再变，
+        // 伙只会被下一行新刷接长——碰到最下排（最新一行）的伙还在长，别处的伙已定型。
+        // 在安全子集里优先点已定型的伙，让最新那一行的伙留到定型后再点；没有已定型的才回落全量。
+        val settled = pool.filter { BoardMemory.maxRowOf(it.comp) < BOTTOM_ROW }
+        val pool2 = if (settled.isNotEmpty()) settled else pool
+        return pool2.sortedWith(
             compareByDescending<Eval> { it.pressureScore }
                 .thenByDescending { it.comp.size }
                 .thenBy { BoardMemory.minRowOf(it.comp) }

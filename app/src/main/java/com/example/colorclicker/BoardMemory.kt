@@ -51,6 +51,8 @@ object BoardMemory {
 
     /** 一伙里最靠墙那只所在排（可为 -1） */
     fun minRowOf(c: Matcher.Comp): Int = (c.ys.ifEmpty { listOf(c.point.y) }).minOf { rowOfY(it) }
+    /** 0.72：这一伙最靠下的那只在第几排（Solver 的“还在长的伙”判断用：碰到第 6 排 = 碰到最新刷出的那一行）。 */
+    fun maxRowOf(c: Matcher.Comp): Int = (c.ys.ifEmpty { listOf(c.point.y) }).maxOf { rowOfY(it) }
 
     /** 期限判断：点掉 killed 这一伙之后，剩下的伙还能不能全部在撞墙前清完。
      *  规则：施法后全体上移一格；一伙里最靠墙那只在第 -1 排还能点，再上移就撞墙。一次施法清一伙。
@@ -444,6 +446,15 @@ object BoardMemory {
         }
         prevActual = actual
         pickRoundHit = hitNow; pickRoundTotal = totalNow
+        // 0.72 诊断（只记不改决策）：每轮整盘类型网格（-1..6 排，每排 6 格，· = 空；类型取名字首字）。
+        // 离线回放用：估计本局种数、同排成串概率、贴底伙被下一行接长的概率，并在真实刷怪序列上比策略。
+        run {
+            val g = HashMap<Pair<Int, Int>, Char>()
+            for (a in actual) g[Pair(a.col, a.row)] = a.type.removePrefix("守卫-").firstOrNull() ?: '?'
+            val sb = StringBuilder()
+            for (r in -1..6) { for (c in 0..5) sb.append(g[Pair(c, r)] ?: '·'); if (r < 6) sb.append('/') }
+            AppLog.d("棋盘", "格 $sb（命中 $hitNow/$totalNow）")
+        }
         // 4. 预测下一轮：去掉点的那伙，其余上移一行；row < -1 的是撞墙的，不进预测
         lastPicked = if (pick != null) pick.cells.ifEmpty { listOf(pick.point) }.map { Cell(pickRule, colOf(it.x), rowOfY(it.y)) } else emptyList()
         predicted = if (pick != null) {
