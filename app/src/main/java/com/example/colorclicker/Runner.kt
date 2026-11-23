@@ -132,6 +132,7 @@ object Runner {
         if (isRunning()) AppLog.i("服务", "运行已停止")
         job?.cancel(); job = null
         BoardOverlayState.post(BoardSnapshot(running = false))   // 0.67：悬浮棋盘显示“未运行”
+        BoardOverlay.hide()   // 0.70：一局结束自动收回关闭悬浮棋盘
     }
 
     private fun cacheKey(path: String) = path + "#" + File(path).lastModified()
@@ -338,6 +339,7 @@ object Runner {
                 deathReport()
                 BoardMemory.endBattle(ctx)
                 BoardOverlayState.post(BoardSnapshot(running = false))   // 0.67：悬浮棋盘显示“未运行”
+                BoardOverlay.hide()   // 0.70：一局结束自动收回关闭悬浮棋盘
             }
         }
     }

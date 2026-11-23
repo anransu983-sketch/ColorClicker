@@ -55,6 +55,8 @@ object GuardScript {
     fun stop() {
         if (isRunning()) AppLog.i("守卫", "一键守卫已停止")
         job?.cancel(); job = null
+        // 0.70：一局结束自动收回关闭悬浮棋盘（Runner 还在跑就不收，棋盘还得显示）
+        if (!Runner.isRunning()) BoardOverlay.hide()
     }
 
     private fun assetBitmap(ctx: Context, asset: String): Bitmap? {

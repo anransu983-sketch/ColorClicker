@@ -193,6 +193,7 @@ object BoardOverlay {
     private var wm: WindowManager? = null
     private var headerText: TextView? = null
     private var boardView: BoardView? = null
+    private val mainHandler = Handler(Looper.getMainLooper())
     private val listener: (BoardSnapshot) -> Unit = { snap ->
         headerText?.text = if (!snap.running) "悬浮棋盘 · 未运行"
         else if (snap.pickName.isEmpty()) "悬浮棋盘 · 等待识别"
@@ -262,6 +263,11 @@ object BoardOverlay {
     }
 
     fun hide() {
+        // 0.70：Runner.stop() 在后台线程调 hide()，removeView 必须在主线程；已在主线程就直接做
+        if (Looper.myLooper() != Looper.getMainLooper()) {
+            mainHandler.post { hide() }
+            return
+        }
         val r = root ?: return
         BoardOverlayState.removeListener(listener)
         try { wm?.removeView(r) } catch (_: Exception) { }
