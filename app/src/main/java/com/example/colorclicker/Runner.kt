@@ -627,6 +627,7 @@ object Runner {
         val counts = ArrayList<String>()
         var verified = ""
         var tpls: List<Matcher.Tpl?> = emptyList()
+        var scans: List<RuleScan> = emptyList()
         var t1 = t0
         var t2 = t0
         if (useFrida) {
@@ -644,7 +645,7 @@ object Runner {
             }
             tpls = clusterRules.map { if (board != null) getTpl(it) else null }
             t1 = System.nanoTime()
-            var scans: List<RuleScan> = try {
+            scans = try {
                 coroutineScope {
                     clusterRules.mapIndexed { i, r -> async(Dispatchers.Default) { scanRule(frame, board, r, tpls[i]) } }.awaitAll()
                 }
