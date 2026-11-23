@@ -45,7 +45,8 @@ object Runner {
     /** 0.47 半截帧等待：点后第一帧伙已消、整盘还没上移（BoardMemory.unshiftedMatch）时稍等重截；最多等 12×100ms，再不上移就按当前帧处理 */
     private const val STALE_RETRY_MS = 100L
     private const val STALE_MAX_RETRY = 12
-    /** 0.78：上移等待中棋盘连续一字不差满 5 轮（本轮 + 4）即判冻住。正常上移 1–2 轮就完成，77/78 局终局白烧 12 次×2 轮约 12 秒。 */
+    /** 0.78：上移等待中棋盘连续一字不差满 5 轮（本轮 + 4）即判冻住。正常上移 1–2 轮就完成，77/78 局终局白烧 12 次×2 轮约 12 秒。
+     *  0.80 改格子级 cellSig：0.78 的 boardSig 用原始匹配坐标，79 局冻盘上仍抖、没触发。 */
     private const val STALE_FROZEN_ROUNDS = 4
     private var staleRetries = 0
     @Volatile private var staleFlag = false
@@ -90,7 +91,7 @@ object Runner {
     /** 0.58：棋盘冻住计数（43 局收尾失灵：蝎子相似度在签名临界 0.81 上下抖，签名一字不差永远凑不满 3 轮，
      *  但 settle 的“8 帧不变”冻住信号不依赖签名；连续 2 轮冻住且中间没有活帧就停）。活帧（liveFrame）时清零。 */
     private var frozenRounds = 0
-    /** 0.78：上移等待里棋盘连续一字不差的计数（配 STALE_FROZEN_ROUNDS）。活帧或上移等待结束时清零。 */
+    /** 0.78：上移等待里棋盘连续一字不差的计数（配 STALE_FROZEN_ROUNDS；0.80 起存格子签名 cellSig）。活帧或上移等待结束时清零。 */
     private var staleSig = ""
     private var staleSame = 0
     @Volatile private var lastTapAt = 0L
@@ -591,12 +592,26 @@ object Runner {
         else -> "余量${hz}"
     }
 
-    /** 棋盘签名（去临界识别：分低于阈值+0.05 的不进签名，防临界抖动）。供“连续一字不差”停机判断复用（0.78 上移等待内也用）。 */
+    /** 棋盘签名（去临界识别：分低于阈值+0.05 的不进签名，防临界抖动）。供“连续一字不差”停机判断复用（点后签名段用）。 */
     private fun boardSig(all: List<Cand>): String {
         val sigComps = all.filter { it.comp.score >= effThr(it.rule) + 0.05 }
         if (sigComps.isEmpty()) return ""
         return sigComps.sortedWith(compareBy({ it.rule.name }, { it.comp.point.y }, { it.comp.point.x }))
             .joinToString(";") { "${it.rule.name}${it.comp.size}@${it.comp.point.x},${it.comp.point.y}" }
+    }
+
+    /** 0.80：格子级棋盘签名（只比每格什么怪，不比精确坐标与分数）。0.78 的 boardSig 直接用 comp.point 原始匹配坐标，
+     *  同一只怪同格能差 11 像素（79 局第 5 排 2710 vs 2721），冻盘上签名凑不满 5 轮一字不差；格子吸附（格距 240）
+     *  对 ±11 像素免疫，冻盘上格子签名稳。供上移等待内冻住判断用，沿用 boardSig 的去临界过滤（分低于阈值+0.05 不进）。 */
+    private fun cellSig(all: List<Cand>): String {
+        val cells = HashSet<String>()
+        for (cand in all) {
+            if (cand.comp.score < effThr(cand.rule) + 0.05) continue
+            val pts = cand.comp.cells.ifEmpty { listOf(cand.comp.point) }
+            for (p in pts) cells.add("${cand.rule.name}@${colOf(p.x)},${rowOf(p.y)}")
+        }
+        if (cells.isEmpty()) return ""
+        return cells.sorted().joinToString(";")
     }
 
     /** 扎堆规则选点（0.19 期限优先）：
@@ -682,12 +697,13 @@ object Runner {
             staleRetries++
             staleFlag = true
             if (staleRetries == 1) AppLog.d("匹配", "点后画面还没上移：被点的伙已消，其余怪仍在原排（原排吻合 ${stale.first}/${stale.second}，上移后吻合 ${stale.third}），等整盘上移再扫")
-            // 0.78：上移等待里棋盘也一字不差就计数，满 5 轮（约 2.5 秒）还没动 = 冻住，战斗已结束，不必等满 12 次。
-            val sSig = boardSig(all)
+            // 0.80：上移等待里格子也一字不差就计数，满 5 轮（约 2.5 秒）还没动 = 冻住，战斗已结束，不必等满 12 次。
+            // 0.78 用 boardSig（原始匹配坐标）失败：79 局同一只怪同格能差 11 像素，签名凑不满 5 轮；格子级 cellSig 对这抖免疫。
+            val sSig = cellSig(all)
             if (sSig.isNotEmpty()) {
                 if (sSig == staleSig) staleSame++ else { staleSig = sSig; staleSame = 0 }
                 if (staleSame >= STALE_FROZEN_ROUNDS) {
-                    AppLog.w("匹配", "上移等待中棋盘连续 ${staleSame + 1} 轮一字不差：盘面冻住，战斗已结束，自动停止")
+                    AppLog.w("匹配", "上移等待中格子连续 ${staleSame + 1} 轮一字不差：盘面冻住，战斗已结束，自动停止")
                     noEffectStop = true
                     return null
                 }
