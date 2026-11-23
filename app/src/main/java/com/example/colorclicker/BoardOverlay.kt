@@ -263,14 +263,26 @@ object BoardOverlay {
     }
 
     fun hide() {
-        // 0.70：Runner.stop() 在后台线程调 hide()，removeView 必须在主线程；已在主线程就直接做
+        // 0.74：0.70 的 removeView 在 Runner.stop()/finally/GuardScript.stop() 三处调用后小窗仍留着（63 局实证），
+        // 疑静默失败；改 removeViewImmediate 立即移除并记日志，下局看日志定性。
         if (Looper.myLooper() != Looper.getMainLooper()) {
+            AppLog.d("悬浮棋盘", "hide() 后台线程，已转主线程")
             mainHandler.post { hide() }
             return
         }
-        val r = root ?: return
+        val r = root
+        if (r == null) {
+            AppLog.d("悬浮棋盘", "hide() 已是空，没什么可收")
+            return
+        }
         BoardOverlayState.removeListener(listener)
-        try { wm?.removeView(r) } catch (_: Exception) { }
+        try {
+            wm?.removeViewImmediate(r)
+            AppLog.d("悬浮棋盘", "hide() 已移除（removeViewImmediate）")
+        } catch (e: Exception) {
+            AppLog.w("悬浮棋盘", "hide() removeViewImmediate 失败：${e.message}，改 removeView")
+            try { wm?.removeView(r) } catch (_: Exception) { }
+        }
         root = null; wm = null; headerText = null; boardView = null
     }
 }
