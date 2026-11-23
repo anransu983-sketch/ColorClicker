@@ -54,6 +54,19 @@ object BoardMemory {
     /** 0.72：这一伙最靠下的那只在第几排（Solver 的“还在长的伙”判断用：碰到第 6 排 = 碰到最新刷出的那一行）。 */
     fun maxRowOf(c: Matcher.Comp): Int = (c.ys.ifEmpty { listOf(c.point.y) }).maxOf { rowOfY(it) }
 
+    /** 0.73 下落＋上移：点掉 tapped 一伙后，存活怪先下落补洞（同列下方有 h 只被点就下落 h 格），
+     *  再全体上移一格。存活怪新排 = 原排 + h - 1（h=0 时就是只上移一行）。63 局离线重放验死：
+     *  20 格有效格（下方有被点格）里下落模型命中 17 格（85%）、只上移 2 格（10%）。
+     *  同列内映射保序、无碰撞（被点格占住的排不可能是存活怪的排）。row < -1 的是撞墙的，调用方自行处理。 */
+    fun fallShift(cells: List<Cell>, tapped: Set<Cell>): List<Cell> {
+        val tappedByCol = HashMap<Int, MutableList<Int>>()
+        for (t in tapped) tappedByCol.getOrPut(t.col) { ArrayList() }.add(t.row)
+        return cells.filter { it !in tapped }.map { c ->
+            val below = tappedByCol[c.col]?.count { it > c.row } ?: 0
+            Cell(c.type, c.col, c.row + below - 1)
+        }
+    }
+
     /** 期限判断：点掉 killed 这一伙之后，剩下的伙还能不能全部在撞墙前清完。
      *  规则：施法后全体上移一格；一伙里最靠墙那只在第 -1 排还能点，再上移就撞墙。一次施法清一伙。
      *  返回 -1：点完这一下，就有一伙上移越线（本轮就结束）；
@@ -455,12 +468,12 @@ object BoardMemory {
             for (r in -1..6) { for (c in 0..5) sb.append(g[Pair(c, r)] ?: '·'); if (r < 6) sb.append('/') }
             AppLog.d("棋盘", "格 $sb（命中 $hitNow/$totalNow）")
         }
-        // 4. 预测下一轮：去掉点的那伙，其余上移一行；row < -1 的是撞墙的，不进预测
+        // 4. 预测下一轮：去掉点的那伙，其余下落补洞再上移一行（0.73 fallShift）；row < -1 的是撞墙的，不进预测
         lastPicked = if (pick != null) pick.cells.ifEmpty { listOf(pick.point) }.map { Cell(pickRule, colOf(it.x), rowOfY(it.y)) } else emptyList()
         predicted = if (pick != null) {
             val picked = pick.cells.ifEmpty { listOf(pick.point) }
                 .map { Cell(pickRule, colOf(it.x), rowOfY(it.y)) }.toSet()
-            actual.filter { it !in picked }.map { Cell(it.type, it.col, it.row - 1) }.filter { it.row >= -1 }
+            fallShift(actual, picked).filter { it.row >= -1 }
         } else actual
         // 5. 0.43 已删：两步前瞻改由 Solver.pick 直接选点，onRound 不再返回提示。
         return null
@@ -471,14 +484,14 @@ object BoardMemory {
     // Runner 与 Solver 同用这个值（Runner 里 HZ_CAP = BoardMemory.HZ_CAP），不用另改。
     const val HZ_CAP = 6
 
-    /** 模拟：点掉 tapped 一伙后其余上移一格。返回（是否有怪越线，下轮最大一伙只数）。 */
+    /** 模拟：点掉 tapped 一伙后其余下落补洞再上移一格（0.73 fallShift）。返回（是否有怪越线，下轮最大一伙只数）。 */
     fun simulateNext(actual: List<Cell>, tapped: Matcher.Comp, tappedName: String, ghosts: List<Cell> = emptyList()): Pair<Boolean, Double> {
         val tappedCells = tapped.cells.ifEmpty { listOf(tapped.point) }
             .map { Cell(tappedName, colOf(it.x), rowOfY(it.y)) }.toSet()
-        val rest = actual.filter { it !in tappedCells }.map { Cell(it.type, it.col, it.row - 1) }
+        val rest = fallShift(actual, tappedCells)
         if (rest.any { it.row < -1 }) return true to 0.0
-        // 0.45：漏数幽灵格（模板没认出但底色有怪）：任何一次施法都会让它们上移，已在 -1 排的会越线
-        if (ghosts.any { it.row - 1 < -1 }) return true to 0.0
+        // 0.45：漏数幽灵格（模板没认出但底色有怪）：任何一次施法都会让它们下落再上移，已在 -1 排的会越线
+        if (fallShift(ghosts, tappedCells).any { it.row < -1 }) return true to 0.0
         val groups = groupCells(rest)
         if (groups.isEmpty()) return false to 0.0
         return false to groups.maxOf { it.size }.toDouble()
@@ -495,9 +508,9 @@ object BoardMemory {
         val (ends, next) = simulateNext(actual, tapped, tappedName, ghostCells)
         val tappedCells = tapped.cells.ifEmpty { listOf(tapped.point) }
             .map { Cell(tappedName, colOf(it.x), rowOfY(it.y)) }.toSet()
-        // 0.64：致死列加权——点完上移后行≤0 的怪是墙压；其中落在致死列（终局墙边有怪 ≥3 次）
+        // 0.64：致死列加权——点完下落再上移后行≤0 的怪是墙压（0.73：按 fallShift 后的排算）；其中落在致死列（终局墙边有怪 ≥3 次）
         // 的怪多算 1 点墙压，求解器会更倾向于清掉这些列的怪、少把怪留在这些列的墙边。
-        val threatCells = actual.filter { it !in tappedCells }.filter { it.row - 1 <= 0 }
+        val threatCells = fallShift(actual, tappedCells).filter { it.row <= 0 }
         val threat = threatCells.size + threatCells.count { isDeadlyCol(it.col) }
         return Triple(ends, next.toInt(), threat)
     }
@@ -516,7 +529,7 @@ object BoardMemory {
         }
         val tappedCells = tapped.cells.ifEmpty { listOf(tapped.point) }
             .map { Cell(tappedName, colOf(it.x), rowOfY(it.y)) }.toSet()
-        val rest = actual.filter { it !in tappedCells }.map { Cell(it.type, it.col, it.row - 1) }
+        val rest = fallShift(actual, tappedCells)
         if (rest.any { it.row < -1 }) return 0
         val groups = groupCells(rest)
         if (groups.size < 2) return 0
