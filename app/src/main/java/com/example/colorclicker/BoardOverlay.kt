@@ -196,6 +196,9 @@ object BoardOverlay {
     // 0.81：hide() 失败时不再丢引用——removeViewImmediate/removeView 抛异常或静默失败后，
     // 旧 view 仍挂在屏幕上、root 却已置空，下次 show() 会另建一个新 view，旧的永远收不回去
     // （用户 2026-11-24 实证：结束后小窗时不时留在挑战页上）。失败时保留引用，靠重试收回。
+    // 0.83：0.81 只防了抛异常，没防静默失败——removeViewImmediate 不抛异常也可能没摘掉 view
+    // （用户 2026-11-24 07:56 两张截图实证：日志写“已移除”，小窗仍在挑战页上）。
+    // 改成以 isAttachedToWindow 为准：摘完还贴着就是没摘掉，保留引用重试。
     private var hideFailed = false
     private var hideRetries = 0
     private val mainHandler = Handler(Looper.getMainLooper())
@@ -209,10 +212,17 @@ object BoardOverlay {
     fun isShowing() = root != null
 
     fun show(ctx: Context): Boolean {
-        if (root != null) {
-            // 0.81：上次 hide() 失败留下的孤儿 view 仍在屏幕上，先把它收掉再建新的，
-            // 否则新旧两个 view 叠在一起、旧的永远收不回去。
-            if (hideFailed) {
+        val cur = root
+        if (cur != null) {
+            // 0.83：root 非空但 view 已不在窗口上（上次 hide() 静默失败后 root 被置空又重建之类），
+            // 引用是死的，清掉重建；否则 show() 返回 true 却什么都没显示。
+            if (!cur.isAttachedToWindow) {
+                AppLog.w("悬浮棋盘", "show() 发现 root 已脱离窗口，清掉引用重建")
+                root = null; wm = null; headerText = null; boardView = null
+                hideFailed = false; hideRetries = 0
+            } else if (hideFailed) {
+                // 0.81：上次 hide() 失败留下的孤儿 view 仍在屏幕上，先把它收掉再建新的，
+                // 否则新旧两个 view 叠在一起、旧的永远收不回去。
                 AppLog.w("悬浮棋盘", "show() 发现上次 hide() 失败留下的 view，先强制收回")
                 hide()
                 if (root != null) return false
@@ -296,14 +306,34 @@ object BoardOverlay {
         var removed = false
         try {
             wm?.removeViewImmediate(r)
-            AppLog.d("悬浮棋盘", "hide() 已移除（removeViewImmediate）")
-            removed = true
+            // 0.83：removeViewImmediate 不抛异常也可能没摘掉（静默失败），以 isAttachedToWindow 为准。
+            if (!r.isAttachedToWindow) {
+                AppLog.d("悬浮棋盘", "hide() 已移除（removeViewImmediate）")
+                removed = true
+            } else {
+                AppLog.w("悬浮棋盘", "hide() removeViewImmediate 未抛异常但 view 还贴着，改 removeView")
+                try {
+                    wm?.removeView(r)
+                    if (!r.isAttachedToWindow) {
+                        AppLog.d("悬浮棋盘", "hide() 已移除（removeView 兜底）")
+                        removed = true
+                    } else {
+                        AppLog.e("悬浮棋盘", "hide() removeView 后 view 还贴着，保留引用等重试")
+                    }
+                } catch (e2: Exception) {
+                    AppLog.e("悬浮棋盘", "hide() removeView 也失败：${e2.message}，保留引用等下次重试")
+                }
+            }
         } catch (e: Exception) {
             AppLog.w("悬浮棋盘", "hide() removeViewImmediate 失败：${e.message}，改 removeView")
             try {
                 wm?.removeView(r)
-                AppLog.d("悬浮棋盘", "hide() 已移除（removeView 兜底）")
-                removed = true
+                if (!r.isAttachedToWindow) {
+                    AppLog.d("悬浮棋盘", "hide() 已移除（removeView 兜底）")
+                    removed = true
+                } else {
+                    AppLog.e("悬浮棋盘", "hide() removeView 后 view 还贴着，保留引用等重试")
+                }
             } catch (e2: Exception) {
                 AppLog.e("悬浮棋盘", "hide() removeView 也失败：${e2.message}，保留引用等下次重试")
             }
