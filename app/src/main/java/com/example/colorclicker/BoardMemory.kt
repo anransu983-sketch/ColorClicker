@@ -39,6 +39,9 @@ object BoardMemory {
     /** “没有可预见的过载”的哨兵值 */
     const val HZ_NONE = 99
     private const val MAX_DUMPS = 4
+    /** 0.77：漏怪可信分——漏数格的最佳模板分低于它时，类型不可信（不点名）、也不代点。
+     *  分界证据：69 局救场真漏怪 0.506；75 局活局弱信号 0.27–0.42；墙区怪最佳分带 0.38–0.47（0.44）。 */
+    const val LEAK_CONFIRM_SCORE = 0.45
 
     data class Cell(val type: String, val col: Int, val row: Int)
     private data class TypeStat(var n: Int = 0, var sum: Double = 0.0, var min: Double = 9.9, var max: Double = 0.0) {
@@ -814,21 +817,33 @@ object BoardMemory {
      *  ② 上一轮审计在下一排（c, r+1）也有漏数格（它随盘上移到这里）。
      *  旧口径（wallMissGroups）只用上一轮审计映射，且审计在选点之后才跑：36 局 13:51:04 那轮 9 格漏数全是本帧新出现，
      *  选点时一格都看不到，余量算成 2，实际 -1 排已有 3 只没认出的怪，点谁都越线，却改点了 1 只的史莱姆而不是 7 只的土豆怪。
-     *  没有旁证的漏数格仍只记日志（审计照常），不进决策。返回按类型连片后的伙（类型名「漏数-<预测类型>」/「漏数-?」）。 */
-    fun confirmedLeakComps(frame: Bitmap?, detected: Set<Pair<Int, Int>>): List<Pair<String, Matcher.Comp>> {
+     *  没有旁证的漏数格仍只记日志（审计照常），不进决策。返回按类型连片后的伙（类型名「漏数-<预测类型>」/「漏数-?」）。
+     *  0.77：现算每格最佳模板分（和 auditWall 同口径，全分辨率 TM_CCOEFF_NORMED）；预测类型只在最佳分 ≥ LEAK_CONFIRM_SCORE
+     *  时才认，否则记成「漏数-?」（不点名）。每伙的逐格最佳分存在 Comp.scores 里，供 Runner 代点时 gate（不代点）。 */
+    fun confirmedLeakComps(frame: Bitmap?, detected: Set<Pair<Int, Int>>, tpls: List<Pair<String, Matcher.Tpl>> = emptyList()): List<Pair<String, Matcher.Comp>> {
         if (frame == null || frame.isRecycled || assistOffBattle) return emptyList()
         return try {
             val cells = ArrayList<Cell>()
+            val bestByCell = HashMap<Pair<Int, Int>, Double>()
             for (r in -1..1) for (c in 0..5) {
                 if (Pair(c, r) in detected) continue
                 if (monsterBg(frame, c, r) != true) continue
                 val pred = predicted.firstOrNull { it.col == c && it.row == r }
-                if (pred != null) cells.add(Cell("漏数-" + pred.type, c, r))
+                // 0.77：没模板可算时 best 为 null，不 gate，沿用旧口径。
+                val best: Double? = if (tpls.isNotEmpty()) {
+                    val p = cellCenter(c, r)
+                    Matcher.bestScoresAtCell(frame, tpls, p.x, p.y).maxOfOrNull { it.second }
+                } else null
+                bestByCell[Pair(c, r)] = best ?: 0.0
+                if (pred != null && (best == null || best >= LEAK_CONFIRM_SCORE)) cells.add(Cell("漏数-" + pred.type, c, r))
+                else if (pred != null) cells.add(Cell("漏数-?", c, r))
                 else if (Pair(c, r + 1) in prevMiss) cells.add(Cell("漏数-?", c, r))
             }
             groupCells(cells).map { g ->
                 val pts = g.map { cellCenter(it.col, it.row) }
-                g.first().type to Matcher.Comp(pts.minByOrNull { it.y }!!, g.size, 0.0, ys = pts.map { it.y }, cells = pts)
+                // 没模板可算时 scores 留空，Runner 的 gate 不生效（沿用旧口径）。
+                val scores = if (tpls.isEmpty()) emptyList() else g.map { bestByCell[Pair(it.col, it.row)] ?: 0.0 }
+                g.first().type to Matcher.Comp(pts.minByOrNull { it.y }!!, g.size, 0.0, ys = pts.map { it.y }, cells = pts, scores = scores)
             }
         } catch (e: Exception) { emptyList() }
     }

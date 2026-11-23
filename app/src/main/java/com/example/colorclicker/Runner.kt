@@ -700,7 +700,9 @@ object Runner {
         // 0.49：幽灵伙改为决策前就看这一帧的漏数，只认有旁证的（预测里有怪 / 上轮审计在下一排也有，见 confirmedLeakComps）。
         // 有旁证的 -1 排幽灵伙不再因“已识别伙在 -1 排”被剔除：它们是上一帧还认得出的怪，只是这一帧模板失手，不是可能的误报。
         // 36 局 13:51:04：已识别 1 只在 -1 排 + 3 只幽灵在 -1 排 → 点谁都越线，应当点只数最大的伙。
-        val ghosts = if (liveFrame) BoardMemory.confirmedLeakComps(frame, detectedCells) else emptyList()
+        // 0.77：diagTpls 提前到这里定义（后面 onRound 复用），供 confirmedLeakComps 现算漏数格最佳分。
+        val diagTpls = clusterRules.mapIndexedNotNull { i, r -> tpls[i]?.let { r.name to it } }
+        val ghosts = if (liveFrame) BoardMemory.confirmedLeakComps(frame, detectedCells, diagTpls) else emptyList()
         if (ghosts.isNotEmpty()) {
             AppLog.d("匹配", "决策前漏数幽灵伙 ${ghosts.size} 个（底色有怪、模板没检出、有旁证）：" + ghosts.joinToString("；") { (name, c) ->
                 name.removePrefix("漏数-").removePrefix("守卫-") + c.cells.joinToString("、", "（", "）") { "第 ${colOf(it.x) + 1} 列第 ${rowOf(it.y)} 排" }
@@ -768,13 +770,22 @@ object Runner {
         // 一次施法只能清一伙，点谁另一伙都越线——保留“确定存在”的已识别伙，不拿它换一个可能是误报的漏数格。
         // 注意 0.44 的 pick 守卫在有幽灵伙时会失效（人人 hz=-1，求解器不一定点 -1 排伙），所以改成直接看棋盘。
         // 0.49：代点候选 = 含 -1 排格的幽灵伙（同上，有旁证）；伙内取格、落点逻辑不变。
-        val fbGroups = ghosts.filter { BoardMemory.minRowOf(it.second) <= -1 }
+        // 0.77：低分漏怪不代点——幽灵伙最佳模板分 < LEAK_CONFIRM_SCORE 时当误报，不进代点候选。
+        // 伙的最佳分 = 伙内各格现算最佳分的最大值（存在 Comp.scores 里）；没分数据时不 gate，沿用旧口径。
+        val wallGhosts = ghosts.filter { BoardMemory.minRowOf(it.second) <= -1 }
+        val fbGhosts = wallGhosts.filter { (_, c) ->
+            c.scores.isEmpty() || (c.scores.maxOrNull() ?: 0.0) >= BoardMemory.LEAK_CONFIRM_SCORE
+        }
+        if (wallGhosts.size > fbGhosts.size) {
+            AppLog.d("匹配", "贴墙漏数代点：${wallGhosts.size - fbGhosts.size} 个幽灵伙最佳分 < ${BoardMemory.LEAK_CONFIRM_SCORE}，当误报不代点")
+        }
+        val fbGroups = fbGhosts
             .map { (_, c) -> c.cells.map { Pair(colOf(it.x), rowOf(it.y)) } }
             .sortedByDescending { it.size }
         if (fbGroups.isNotEmpty() && detectedAtWall) {
             // 0.57：只记不改决策——存下“漏数伙 vs 已识别伙”的只数对照，攒证据看漏数伙什么时候会比实点的伙大。
             // 漏数伙只数口径：类型是预测补出来的（漏数-<类型>）= 这么多格是下限；漏数-? = 不同种的格可能连在一起，是上限。
-            val ghostCmp = ghosts.filter { BoardMemory.minRowOf(it.second) <= -1 }.maxByOrNull { it.second.size }
+            val ghostCmp = fbGhosts.maxByOrNull { it.second.size }
             val ghostCmpTxt = if (ghostCmp == null) "" else "；[对照·不改决策] 漏数伙最大 ${ghostCmp.second.size} 格（${ghostCmp.first.removePrefix("漏数-").removePrefix("守卫-")}，" +
                 (if (ghostCmp.first == "漏数-?") "类型未知=上限" else "有类型=下限") + "），实点 ${pickEv.cand.comp.size} 只"
             AppLog.w("匹配", "贴墙漏数伙 ${fbGroups.size} 个含 -1 排格，但已识别的伙里也有 -1 排的：一次只能清一伙，点谁都有一伙越线，保留已识别的伙（漏数格：${fbGroups.first().joinToString("、") { "第 ${it.first + 1} 列第 ${it.second} 排" }}）$ghostCmpTxt")
@@ -827,7 +838,6 @@ object Runner {
         }
         rememberRound(evs, pick, frame)
         val near = scans.flatMap { s -> s.near.map { s.rule.name to it } }
-        val diagTpls = clusterRules.mapIndexedNotNull { i, r -> tpls[i]?.let { r.name to it } }
         BoardMemory.onRound(compsAll, pick.comp, pick.rule.name, frame, near, diagTpls)?.let { AppLog.d("记忆", it) }
         // 0.67 悬浮迷你棋盘：每轮把认到的棋盘＋要点的伙发给悬浮窗（只显示，不改决策）。
         BoardOverlayState.post(
