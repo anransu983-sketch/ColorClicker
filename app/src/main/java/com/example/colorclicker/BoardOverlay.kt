@@ -193,6 +193,11 @@ object BoardOverlay {
     private var wm: WindowManager? = null
     private var headerText: TextView? = null
     private var boardView: BoardView? = null
+    // 0.81：hide() 失败时不再丢引用——removeViewImmediate/removeView 抛异常或静默失败后，
+    // 旧 view 仍挂在屏幕上、root 却已置空，下次 show() 会另建一个新 view，旧的永远收不回去
+    // （用户 2026-11-24 实证：结束后小窗时不时留在挑战页上）。失败时保留引用，靠重试收回。
+    private var hideFailed = false
+    private var hideRetries = 0
     private val mainHandler = Handler(Looper.getMainLooper())
     private val listener: (BoardSnapshot) -> Unit = { snap ->
         headerText?.text = if (!snap.running) "悬浮棋盘 · 未运行"
@@ -204,7 +209,17 @@ object BoardOverlay {
     fun isShowing() = root != null
 
     fun show(ctx: Context): Boolean {
-        if (root != null) return true
+        if (root != null) {
+            // 0.81：上次 hide() 失败留下的孤儿 view 仍在屏幕上，先把它收掉再建新的，
+            // 否则新旧两个 view 叠在一起、旧的永远收不回去。
+            if (hideFailed) {
+                AppLog.w("悬浮棋盘", "show() 发现上次 hide() 失败留下的 view，先强制收回")
+                hide()
+                if (root != null) return false
+            } else {
+                return true
+            }
+        }
         if (!Settings.canDrawOverlays(ctx)) return false
         val appCtx = ctx.applicationContext
         val manager = appCtx.getSystemService(Context.WINDOW_SERVICE) as WindowManager
@@ -265,6 +280,8 @@ object BoardOverlay {
     fun hide() {
         // 0.74：0.70 的 removeView 在 Runner.stop()/finally/GuardScript.stop() 三处调用后小窗仍留着（63 局实证），
         // 疑静默失败；改 removeViewImmediate 立即移除并记日志，下局看日志定性。
+        // 0.81：removeViewImmediate/removeView 失败时不再丢引用——失败就保留 root/wm，记 hideFailed，
+        // 下次 show()/hide() 再试；成功才置空。否则 view 孤儿化、永远收不回去。
         if (Looper.myLooper() != Looper.getMainLooper()) {
             AppLog.d("悬浮棋盘", "hide() 后台线程，已转主线程")
             mainHandler.post { hide() }
@@ -276,13 +293,36 @@ object BoardOverlay {
             return
         }
         BoardOverlayState.removeListener(listener)
+        var removed = false
         try {
             wm?.removeViewImmediate(r)
             AppLog.d("悬浮棋盘", "hide() 已移除（removeViewImmediate）")
+            removed = true
         } catch (e: Exception) {
             AppLog.w("悬浮棋盘", "hide() removeViewImmediate 失败：${e.message}，改 removeView")
-            try { wm?.removeView(r) } catch (_: Exception) { }
+            try {
+                wm?.removeView(r)
+                AppLog.d("悬浮棋盘", "hide() 已移除（removeView 兜底）")
+                removed = true
+            } catch (e2: Exception) {
+                AppLog.e("悬浮棋盘", "hide() removeView 也失败：${e2.message}，保留引用等下次重试")
+            }
         }
-        root = null; wm = null; headerText = null; boardView = null
+        if (removed) {
+            root = null; wm = null; headerText = null; boardView = null
+            hideFailed = false
+            hideRetries = 0
+        } else {
+            // 移除失败：保留引用，下次 show()/hide() 会重试；同时 500ms 后再试一次，
+            // 免得只靠下次调用才收（用户看到的就是“结束了收不回去”）。最多再试 3 次，
+            // 再失败就认了（WindowManager 已坏，重试也没用），避免无限刷日志。
+            hideFailed = true
+            hideRetries++
+            if (hideRetries <= 3) {
+                mainHandler.postDelayed({ if (root != null) hide() }, 500)
+            } else {
+                AppLog.e("悬浮棋盘", "hide() 重试 3 次仍失败，放弃（view 可能已孤儿化）")
+            }
+        }
     }
 }
