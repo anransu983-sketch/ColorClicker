@@ -508,10 +508,11 @@ object BoardMemory {
         val (ends, next) = simulateNext(actual, tapped, tappedName, ghostCells)
         val tappedCells = tapped.cells.ifEmpty { listOf(tapped.point) }
             .map { Cell(tappedName, colOf(it.x), rowOfY(it.y)) }.toSet()
-        // 0.64：致死列加权——点完下落再上移后行≤0 的怪是墙压（0.73：按 fallShift 后的排算）；其中落在致死列（终局墙边有怪 ≥3 次）
-        // 的怪多算 1 点墙压，求解器会更倾向于清掉这些列的怪、少把怪留在这些列的墙边。
+        // 0.75：墙压按排加权——点完下落再上移后，-1 排怪记 2（只剩 1 次机会）、0 排怪记 1（还有 2 次）；
+        // 原先 -1 和 0 都记 1，求解器看不见“把 -1 拉回 0 白赚一次施法”的收益，墙边怪被一拖再拖成钉死。
+        // 致死列（终局墙边有怪 ≥3 次）的怪再加 1。0.64 的致死列加权保留、0.73 的 fallShift 口径不变。
         val threatCells = fallShift(actual, tappedCells).filter { it.row <= 0 }
-        val threat = threatCells.size + threatCells.count { isDeadlyCol(it.col) }
+        val threat = threatCells.sumOf { if (it.row <= -1) 2 else 1 } + threatCells.count { isDeadlyCol(it.col) }
         return Triple(ends, next.toInt(), threat)
     }
 

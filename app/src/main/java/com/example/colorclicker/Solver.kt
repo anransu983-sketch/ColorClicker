@@ -51,7 +51,8 @@ object Solver {
     ) {
         /** 0.57：值 = 两步值（确定的）。合群不再进值，只在并列时当末位排序（见头注释）。 */
         val value: Int get() = twoStep
-        /** 0.60 墙压分 = 两步值 - 下一盘墙压（点完上移后行<=0 的怪数）。留墙区怪越多越扣分。 */
+        /** 0.60 墙压分 = 两步值 - 下一盘墙压。0.75 起墙压按排加权（-1 排怪记 2、0 排记 1，见 BoardMemory.simulateNextStats），
+         *  留墙区怪越多越扣分，-1 排的怪扣得最狠。 */
         val pressureScore: Int get() = twoStep - threat
     }
 
