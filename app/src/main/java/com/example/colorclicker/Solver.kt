@@ -36,8 +36,13 @@ package com.example.colorclicker
  * 下轮最大一伙来自已存活的格子；新刷的怪未知，两边都不算，所以不用折扣。
  */
 object Solver {
-    /** 0.72：最新刷出的那一行（棋盘最下排）。下一次施法后新一行刷在它下面，只有碰到这一行的伙还能被接长。 */
-    private const val BOTTOM_ROW = 6
+    /** 0.82 敢点大伙：撤掉 0.72 的定型延后。
+     *  0.72 的定型过滤让求解器只在“已定型”（不碰最下排）的伙里挑，把还长着的大伙一让再让，
+     *  88 局实证：期限规则指着土豆 11 只、蝎子 19 只，求解器却改去点史莱姆 1 只、土豆 1 只，
+     *  场均只清 3.7 只、盘净增 2.3 只/次，十几二十次灌满即死。
+     *  仿真 19 策略×400 局：去定型（K）19.2 轮/529 分 vs 有定型（M）14.4 轮/377 分，是最大的单杠杆。
+     *  仿真刷怪均匀随机、复现不了真机单种怪占盘，定型在真机的价值可能被低估——但用户 2026-11-24
+     *  拍板“改呀”，先撤掉看真机。安全子集（hz>=1）与墙压×2（pressureScore）不动，只撤定型。 */
 
     data class Eval(
         val ruleName: String,
@@ -86,12 +91,8 @@ object Solver {
             safe.isNotEmpty() -> safe
             else -> evals.filter { it.hz != -1 }.ifEmpty { evals }
         }
-        // 0.72 成长感知延后（0.79 回 0.75 结构，urgent 已撤）：棋盘没有重力、洞不补，已有的怪之间的相邻关系不会再变，
-        // 伙只会被下一行新刷接长——碰到最下排（最新一行）的伙还在长，别处的伙已定型。
-        // 在安全子集里优先点已定型的伙，让最新那一行的伙留到定型后再点；没有已定型的才回落全量。
-        val settled = pool.filter { BoardMemory.maxRowOf(it.comp) < BOTTOM_ROW }
-        val pool2 = if (settled.isNotEmpty()) settled else pool
-        return pool2.sortedWith(
+        // 0.82 撤定型延后：不再只在已定型的伙里挑，安全子集里直接按墙压分排，大伙不再被让。
+        return pool.sortedWith(
             compareByDescending<Eval> { it.pressureScore }
                 .thenByDescending { it.comp.size }
                 .thenBy { BoardMemory.minRowOf(it.comp) }
