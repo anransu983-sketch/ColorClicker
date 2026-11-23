@@ -45,6 +45,8 @@ object Runner {
     /** 0.47 半截帧等待：点后第一帧伙已消、整盘还没上移（BoardMemory.unshiftedMatch）时稍等重截；最多等 12×100ms，再不上移就按当前帧处理 */
     private const val STALE_RETRY_MS = 100L
     private const val STALE_MAX_RETRY = 12
+    /** 0.78：上移等待中棋盘连续一字不差满 5 轮（本轮 + 4）即判冻住。正常上移 1–2 轮就完成，77/78 局终局白烧 12 次×2 轮约 12 秒。 */
+    private const val STALE_FROZEN_ROUNDS = 4
     private var staleRetries = 0
     @Volatile private var staleFlag = false
     @Volatile private var slidingFlag = false
@@ -88,6 +90,9 @@ object Runner {
     /** 0.58：棋盘冻住计数（43 局收尾失灵：蝎子相似度在签名临界 0.81 上下抖，签名一字不差永远凑不满 3 轮，
      *  但 settle 的“8 帧不变”冻住信号不依赖签名；连续 2 轮冻住且中间没有活帧就停）。活帧（liveFrame）时清零。 */
     private var frozenRounds = 0
+    /** 0.78：上移等待里棋盘连续一字不差的计数（配 STALE_FROZEN_ROUNDS）。活帧或上移等待结束时清零。 */
+    private var staleSig = ""
+    private var staleSame = 0
     @Volatile private var lastTapAt = 0L
 
     /** 0.22 防重复点：上次扎堆点击的目标与点之前那盘的签名。棋盘没变又选中同一目标 = 读到的是点之前的旧帧，跳过不点 */
@@ -586,6 +591,14 @@ object Runner {
         else -> "余量${hz}"
     }
 
+    /** 棋盘签名（去临界识别：分低于阈值+0.05 的不进签名，防临界抖动）。供“连续一字不差”停机判断复用（0.78 上移等待内也用）。 */
+    private fun boardSig(all: List<Cand>): String {
+        val sigComps = all.filter { it.comp.score >= effThr(it.rule) + 0.05 }
+        if (sigComps.isEmpty()) return ""
+        return sigComps.sortedWith(compareBy({ it.rule.name }, { it.comp.point.y }, { it.comp.point.x }))
+            .joinToString(";") { "${it.rule.name}${it.comp.size}@${it.comp.point.x},${it.comp.point.y}" }
+    }
+
     /** 扎堆规则选点（0.19 期限优先）：
      *  1) 先看“点完它之后，剩下的伙还能不能全在撞墙前清完”（BoardMemory.horizonAfterKill）；余量封顶 HZ_CAP 后再比；
      *  2) 余量相同比只数；再同则 y 小（更靠墙）；再同比相似度。
@@ -669,21 +682,28 @@ object Runner {
             staleRetries++
             staleFlag = true
             if (staleRetries == 1) AppLog.d("匹配", "点后画面还没上移：被点的伙已消，其余怪仍在原排（原排吻合 ${stale.first}/${stale.second}，上移后吻合 ${stale.third}），等整盘上移再扫")
+            // 0.78：上移等待里棋盘也一字不差就计数，满 5 轮（约 2.5 秒）还没动 = 冻住，战斗已结束，不必等满 12 次。
+            val sSig = boardSig(all)
+            if (sSig.isNotEmpty()) {
+                if (sSig == staleSig) staleSame++ else { staleSig = sSig; staleSame = 0 }
+                if (staleSame >= STALE_FROZEN_ROUNDS) {
+                    AppLog.w("匹配", "上移等待中棋盘连续 ${staleSame + 1} 轮一字不差：盘面冻住，战斗已结束，自动停止")
+                    noEffectStop = true
+                    return null
+                }
+            } else staleSame = 0
             return null
         }
         if (staleRetries > 0) AppLog.d("匹配", "上移等待结束：重试 $staleRetries 次" + if (staleRetries >= STALE_MAX_RETRY) "（到上限，按当前帧处理）" else "")
         staleRetries = 0
+        staleSig = ""; staleSame = 0
         // 棋盘签名：施法后整盘会上移一行，签名必变；连续一样 = 点击没触发施法。
         // 签名里去掉贴着阈值的临界识别（0.19 实测：蛇 0.71~0.73 对 0.7 阈值，一轮有一轮没，
         // 签名每轮都变、无效果停永远触发不了，才会在结算画面上空点 7 轮）。临界只影响签名，不影响选目标。
-        val sigComps = all.filter { it.comp.score >= effThr(it.rule) + 0.05 }
-        var roundSig = ""
-        if (sigComps.isNotEmpty()) {
-            val sig = sigComps.sortedWith(compareBy({ it.rule.name }, { it.comp.point.y }, { it.comp.point.x }))
-                .joinToString(";") { "${it.rule.name}${it.comp.size}@${it.comp.point.x},${it.comp.point.y}" }
-            roundSig = sig
-            if (sig == lastSig) sameRounds++ else sameRounds = 0
-            lastSig = sig
+        val roundSig = boardSig(all)
+        if (roundSig.isNotEmpty()) {
+            if (roundSig == lastSig) sameRounds++ else sameRounds = 0
+            lastSig = roundSig
             if (sameRounds >= 2) {
                 AppLog.w("匹配", "连续 ${sameRounds + 1} 轮棋盘一字不差：点击没有触发施法，战斗可能已结束（或城墙已破），自动停止")
                 noEffectStop = true
@@ -695,7 +715,7 @@ object Runner {
         val detectedCells = all.flatMap { it.comp.cells.ifEmpty { listOf(it.comp.point) } }
             .map { Pair(colOf(it.x), rowOf(it.y)) }.toSet()
         val liveFrame = BoardMemory.continuesPrediction(compsAll) && !BoardMemory.frameVeiled(frame)   // 0.45b：发白/压暗盖层帧也不算 live
-        if (liveFrame) frozenRounds = 0   // 0.58：活帧说明棋盘在推进，冻住计数清零
+        if (liveFrame) { frozenRounds = 0; staleSig = ""; staleSame = 0 }   // 0.58：活帧说明棋盘在推进，冻住计数清零（0.78：上移等待冻住计数也清零）
         val detectedAtWall = all.any { BoardMemory.minRowOf(it.comp) <= -1 }
         // 0.49：幽灵伙改为决策前就看这一帧的漏数，只认有旁证的（预测里有怪 / 上轮审计在下一排也有，见 confirmedLeakComps）。
         // 有旁证的 -1 排幽灵伙不再因“已识别伙在 -1 排”被剔除：它们是上一帧还认得出的怪，只是这一帧模板失手，不是可能的误报。
