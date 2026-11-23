@@ -38,6 +38,8 @@ package com.example.colorclicker
 object Solver {
     /** 0.72：最新刷出的那一行（棋盘最下排）。下一次施法后新一行刷在它下面，只有碰到这一行的伙还能被接长。 */
     private const val BOTTOM_ROW = 6
+    /** 0.76 墙边止损线：minRow ≤ 1 的伙离墙只剩 1~2 次施法，再养就顶到 -2，必须先收。 */
+    private const val URGENT_ROW = 1
 
     data class Eval(
         val ruleName: String,
@@ -72,6 +74,9 @@ object Solver {
      *  0.59 生存优先：先取 hz >= 1 的安全子集（点完后至少 2 轮内不强制撞墙），再在其中排序；
      *  安全子集不存在时回落旧口径（hz != -1，仍无则全量）。
      *  0.60：子集内按墙压分（两步值 - 下一盘墙压）→ 只数 → 靠墙 → 合群 → 相似度排。
+     *  0.76 墙边止损：安全子集里先看有没有 minRow ≤ 1 的伙（离墙只剩 1~2 次施法），有就只在其中挑，
+     *  不管它定没定型——0.72 的定型延后只对离墙远的伙生效。71 局教训：土豆养到 26 只顶到 -1 排才想收，
+     *  游戏已结束、结算 15 只（App 记 93 只全是死盘空点）。
      *  hz == -1（点完即撞墙）的候选只在全部候选都是 -1 时才入选。 */
     fun pick(compsAll: List<Pair<String, Matcher.Comp>>, ghosts: List<Pair<String, Matcher.Comp>> = emptyList()): Eval? {
         if (compsAll.isEmpty()) return null
@@ -81,11 +86,18 @@ object Solver {
             safe.isNotEmpty() -> safe
             else -> evals.filter { it.hz != -1 }.ifEmpty { evals }
         }
-        // 0.72 成长感知延后：棋盘没有重力、洞不补，已有的怪之间的相邻关系不会再变，
-        // 伙只会被下一行新刷接长——碰到最下排（最新一行）的伙还在长，别处的伙已定型。
-        // 在安全子集里优先点已定型的伙，让最新那一行的伙留到定型后再点；没有已定型的才回落全量。
-        val settled = pool.filter { BoardMemory.maxRowOf(it.comp) < BOTTOM_ROW }
-        val pool2 = if (settled.isNotEmpty()) settled else pool
+        // 0.76 墙边止损：minRow ≤ 1 的伙再养就顶到 -2，先收；没有墙边伙才走 0.72 定型延后。
+        val urgent = pool.filter { BoardMemory.minRowOf(it.comp) <= URGENT_ROW }
+        val pool2 = when {
+            urgent.isNotEmpty() -> urgent
+            else -> {
+                // 0.72 成长感知延后：棋盘没有重力、洞不补，已有的怪之间的相邻关系不会再变，
+                // 伙只会被下一行新刷接长——碰到最下排（最新一行）的伙还在长，别处的伙已定型。
+                // 在安全子集里优先点已定型的伙，让最新那一行的伙留到定型后再点；没有已定型的才回落全量。
+                val settled = pool.filter { BoardMemory.maxRowOf(it.comp) < BOTTOM_ROW }
+                if (settled.isNotEmpty()) settled else pool
+            }
+        }
         return pool2.sortedWith(
             compareByDescending<Eval> { it.pressureScore }
                 .thenByDescending { it.comp.size }
