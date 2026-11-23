@@ -512,7 +512,7 @@ object BoardMemory {
         // 原先 -1 和 0 都记 1，求解器看不见“把 -1 拉回 0 白赚一次施法”的收益，墙边怪被一拖再拖成钉死。
         // 致死列（终局墙边有怪 ≥3 次）的怪再加 1。0.64 的致死列加权保留、0.73 的 fallShift 口径不变。
         val threatCells = fallShift(actual, tappedCells).filter { it.row <= 0 }
-        val threat = threatCells.sumOf { if (it.row <= -1) 2 else 1 } + threatCells.count { isDeadlyCol(it.col) }
+        val threat = threatCells.count { it.row <= -1 } * 2 + threatCells.count { it.row == 0 } + threatCells.count { isDeadlyCol(it.col) }
         return Triple(ends, next.toInt(), threat)
     }
 
