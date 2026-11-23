@@ -26,7 +26,7 @@ package com.example.colorclicker
  *  候选”时才改 pick，47 局里这种情况直到盘子已死才出现（末尾两次 -1 救场各买 1 轮）。
  *  补一刀连续量：simulateNextStats 早就算了下一盘的墙压 threat（点完上移后行<=0 的怪数），
  *  求解器之前把它丢了（`_`）。0.60 在安全子集里按（两步值 - 墙压）排序——留墙区怪越多的候选
- *  越扣分，逼求解器提前把墙区怪清掉，别等墙边才救火。本地仿真同盘 400 局：0.59（B）7.3 轮/216 分，
+ *  越扣分，逼求解器提前把墙区怪清掉，别等墙边才救火（0.79 起翻倍为两步值 - 2×墙压，见 pressureScore）。本地仿真同盘 400 局：0.59（B）7.3 轮/216 分，
  *  0.60（G）8.2 轮/234 分；墙区优先清（F）8.3 轮/233 分、期限优先（D）9.0 轮/242 分。
  *  没上 F/D：F 把墙区清数当主排序键太激进（会拿 1 只墙怪换 7 只中盘怪），D 在真机上分低被 0.43 取代过；
  *  G 是 0.59 的温和延续（安全滤网不动，只在子集里加墙压罚）。仿真不是保证（它也曾预言 0.59 会涨、
@@ -38,8 +38,6 @@ package com.example.colorclicker
 object Solver {
     /** 0.72：最新刷出的那一行（棋盘最下排）。下一次施法后新一行刷在它下面，只有碰到这一行的伙还能被接长。 */
     private const val BOTTOM_ROW = 6
-    /** 0.76 墙边止损线：minRow ≤ 1 的伙离墙只剩 1~2 次施法，再养就顶到 -2，必须先收。 */
-    private const val URGENT_ROW = 1
 
     data class Eval(
         val ruleName: String,
@@ -54,8 +52,10 @@ object Solver {
         /** 0.57：值 = 两步值（确定的）。合群不再进值，只在并列时当末位排序（见头注释）。 */
         val value: Int get() = twoStep
         /** 0.60 墙压分 = 两步值 - 下一盘墙压。0.75 起墙压按排加权（-1 排怪记 2、0 排记 1，见 BoardMemory.simulateNextStats），
-         *  留墙区怪越多越扣分，-1 排的怪扣得最狠。 */
-        val pressureScore: Int get() = twoStep - threat
+         *  留墙区怪越多越扣分，-1 排的怪扣得最狠。
+         *  0.79 墙压翻倍：两步值 - 2×下一盘墙压。仿真 19 策略×400 局全场最好（20.7 轮/577 分），
+         *  真机 0.75（墙压×1）已是各版最好（17.5 施法/68.5 只），翻倍是仿真最强的单杠杆。 */
+        val pressureScore: Int get() = twoStep - 2 * threat
     }
 
     /** 给一伙打分：余量 + 模拟下一步（复用 BoardMemory.simulateNextStats，不另写分组逻辑）+ 合群。 */
@@ -74,9 +74,9 @@ object Solver {
      *  0.59 生存优先：先取 hz >= 1 的安全子集（点完后至少 2 轮内不强制撞墙），再在其中排序；
      *  安全子集不存在时回落旧口径（hz != -1，仍无则全量）。
      *  0.60：子集内按墙压分（两步值 - 下一盘墙压）→ 只数 → 靠墙 → 合群 → 相似度排。
-     *  0.76 墙边止损：安全子集里先看有没有 minRow ≤ 1 的伙（离墙只剩 1~2 次施法），有就只在其中挑，
-     *  不管它定没定型——0.72 的定型延后只对离墙远的伙生效。71 局教训：土豆养到 26 只顶到 -1 排才想收，
-     *  游戏已结束、结算 15 只（App 记 93 只全是死盘空点）。
+     *  0.79 撤墙边止损、回 0.75 结构：0.76 的 urgent 过滤真机四局（72–75）场均 14.5 施法/55.3 只，
+     *  低于 0.75 四局（67–70）的 17.5 施法/68.5 只，仿真也说 N<M（13.6<14.4）——逼着点墙边小伙
+     *  反而把大伙让死。撤掉后安全子集里直接走 0.72 定型延后（0.75 原样），墙压改翻倍（见 pressureScore）。
      *  hz == -1（点完即撞墙）的候选只在全部候选都是 -1 时才入选。 */
     fun pick(compsAll: List<Pair<String, Matcher.Comp>>, ghosts: List<Pair<String, Matcher.Comp>> = emptyList()): Eval? {
         if (compsAll.isEmpty()) return null
@@ -86,18 +86,11 @@ object Solver {
             safe.isNotEmpty() -> safe
             else -> evals.filter { it.hz != -1 }.ifEmpty { evals }
         }
-        // 0.76 墙边止损：minRow ≤ 1 的伙再养就顶到 -2，先收；没有墙边伙才走 0.72 定型延后。
-        val urgent = pool.filter { BoardMemory.minRowOf(it.comp) <= URGENT_ROW }
-        val pool2 = when {
-            urgent.isNotEmpty() -> urgent
-            else -> {
-                // 0.72 成长感知延后：棋盘没有重力、洞不补，已有的怪之间的相邻关系不会再变，
-                // 伙只会被下一行新刷接长——碰到最下排（最新一行）的伙还在长，别处的伙已定型。
-                // 在安全子集里优先点已定型的伙，让最新那一行的伙留到定型后再点；没有已定型的才回落全量。
-                val settled = pool.filter { BoardMemory.maxRowOf(it.comp) < BOTTOM_ROW }
-                if (settled.isNotEmpty()) settled else pool
-            }
-        }
+        // 0.72 成长感知延后（0.79 回 0.75 结构，urgent 已撤）：棋盘没有重力、洞不补，已有的怪之间的相邻关系不会再变，
+        // 伙只会被下一行新刷接长——碰到最下排（最新一行）的伙还在长，别处的伙已定型。
+        // 在安全子集里优先点已定型的伙，让最新那一行的伙留到定型后再点；没有已定型的才回落全量。
+        val settled = pool.filter { BoardMemory.maxRowOf(it.comp) < BOTTOM_ROW }
+        val pool2 = if (settled.isNotEmpty()) settled else pool
         return pool2.sortedWith(
             compareByDescending<Eval> { it.pressureScore }
                 .thenByDescending { it.comp.size }
