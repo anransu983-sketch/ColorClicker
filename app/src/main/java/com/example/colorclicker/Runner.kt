@@ -620,39 +620,55 @@ object Runner {
      *  另外检测“点击没效果”（棋盘连续一字不差）并自动停。 */
     private suspend fun matchClusterRound(ctx: Context, frame: Bitmap, clusterRules: List<Rule>): ClusterPick? {
         val t0 = System.nanoTime()
-        val board: Matcher.BoardView? = try { Matcher.prepareBoard(frame) } catch (e: Exception) {
-            AppLog.e("匹配", "棋盘裁剪失败，本轮走旧路径", e); null
-        }
-        val tpls = clusterRules.map { if (board != null) getTpl(it) else null }
-        val t1 = System.nanoTime()
-        var scans: List<RuleScan> = try {
-            coroutineScope {
-                clusterRules.mapIndexed { i, r -> async(Dispatchers.Default) { scanRule(frame, board, r, tpls[i]) } }.awaitAll()
-            }
-        } finally {
-            board?.release()
-        }
-        var verified = ""
-        if (board != null && scans.all { it.comps.isEmpty() }) {
-            // 零命中复核：整轮什么都没找到时用旧路径（全分辨率）再扫一遍，既防快路径漏识别，也量出漏了多少
-            val legacy = clusterRules.map { scanRule(frame, null, it, null) }
-            val n = legacy.sumOf { s -> s.comps.sumOf { it.size } }
-            if (n > 0) AppLog.w("匹配", "零命中复核：快路径整轮 0 只，旧路径（全分辨率）却找到 $n 只——快路径漏识别，请把这行和当时截图发我")
-            else verified = "（旧路径复核也是 0）"
-            scans = legacy
-        }
-        scans = resolveConflicts(scans)
-        scans = promoteNear(frame, scans)   // 0.57 邻格补认：近阈值格贴着同类已认出的怪、底色一致 → 并入那一伙
-        val t2 = System.nanoTime()
-
+        // 0.81 Frida 棋盘优先：先读 logcat 里的 BOARD-GRID，有就直接用，跳过模板扫描；读不到回落模板。
+        val fridaPairs = FridaBoard.readComps()
+        val useFrida = fridaPairs.isNotEmpty()
         val all = ArrayList<Cand>()
         val counts = ArrayList<String>()
-        for (s in scans) {
-            if (s.note != null) { counts.add("${s.rule.name} ${s.note}"); continue }
-            if (s.comps.isEmpty()) { counts.add("${s.rule.name} 0只"); continue }
-            val b = s.comps.sortedWith(compareByDescending<Matcher.Comp> { it.size }.thenBy { it.point.y }).first()
-            counts.add("${s.rule.name} ${b.size}只(y${b.point.y})")
-            for (c in s.comps) all.add(Cand(s.rule, c))
+        var verified = ""
+        var tpls: List<Matcher.Tpl?> = emptyList()
+        var t1 = t0
+        var t2 = t0
+        if (useFrida) {
+            for ((name, comp) in fridaPairs) {
+                val r = clusterRules.firstOrNull { it.name == name }
+                    ?: Rule(id = "frida", name = name, type = "image", threshold = 0.0, delayMs = 600, clusterFirst = true)
+                all.add(Cand(r, comp))
+            }
+            val n = all.sumOf { it.comp.size }
+            counts.add("Frida $n 只")
+            AppLog.d("Frida", "棋盘来自 Frida：$n 只，${all.size} 伙")
+        } else {
+            val board: Matcher.BoardView? = try { Matcher.prepareBoard(frame) } catch (e: Exception) {
+                AppLog.e("匹配", "棋盘裁剪失败，本轮走旧路径", e); null
+            }
+            tpls = clusterRules.map { if (board != null) getTpl(it) else null }
+            t1 = System.nanoTime()
+            var scans: List<RuleScan> = try {
+                coroutineScope {
+                    clusterRules.mapIndexed { i, r -> async(Dispatchers.Default) { scanRule(frame, board, r, tpls[i]) } }.awaitAll()
+                }
+            } finally {
+                board?.release()
+            }
+            if (board != null && scans.all { it.comps.isEmpty() }) {
+                // 零命中复核：整轮什么都没找到时用旧路径（全分辨率）再扫一遍，既防快路径漏识别，也量出漏了多少
+                val legacy = clusterRules.map { scanRule(frame, null, it, null) }
+                val n = legacy.sumOf { s -> s.comps.sumOf { it.size } }
+                if (n > 0) AppLog.w("匹配", "零命中复核：快路径整轮 0 只，旧路径（全分辨率）却找到 $n 只——快路径漏识别，请把这行和当时截图发我")
+                else verified = "（旧路径复核也是 0）"
+                scans = legacy
+            }
+            scans = resolveConflicts(scans)
+            scans = promoteNear(frame, scans)   // 0.57 邻格补认：近阈值格贴着同类已认出的怪、底色一致 → 并入那一伙
+            t2 = System.nanoTime()
+            for (s in scans) {
+                if (s.note != null) { counts.add("${s.rule.name} ${s.note}"); continue }
+                if (s.comps.isEmpty()) { counts.add("${s.rule.name} 0只"); continue }
+                val b = s.comps.sortedWith(compareByDescending<Matcher.Comp> { it.size }.thenBy { it.point.y }).first()
+                counts.add("${s.rule.name} ${b.size}只(y${b.point.y})")
+                for (c in s.comps) all.add(Cand(s.rule, c))
+            }
         }
         val summary = "本轮比数量：${counts.joinToString(" / ")}"
         if (all.isEmpty()) {
@@ -738,7 +754,7 @@ object Runner {
         // 36 局 13:51:04：已识别 1 只在 -1 排 + 3 只幽灵在 -1 排 → 点谁都越线，应当点只数最大的伙。
         // 0.77：diagTpls 提前到这里定义（后面 onRound 复用），供 confirmedLeakComps 现算漏数格最佳分。
         val diagTpls = clusterRules.mapIndexedNotNull { i, r -> tpls[i]?.let { r.name to it } }
-        val ghosts = if (liveFrame) BoardMemory.confirmedLeakComps(frame, detectedCells, diagTpls) else emptyList()
+        val ghosts = if (useFrida) emptyList() else if (liveFrame) BoardMemory.confirmedLeakComps(frame, detectedCells, diagTpls) else emptyList()
         if (ghosts.isNotEmpty()) {
             AppLog.d("匹配", "决策前漏数幽灵伙 ${ghosts.size} 个（底色有怪、模板没检出、有旁证）：" + ghosts.joinToString("；") { (name, c) ->
                 name.removePrefix("漏数-").removePrefix("守卫-") + c.cells.joinToString("、", "（", "）") { "第 ${colOf(it.x) + 1} 列第 ${rowOf(it.y)} 排" }
