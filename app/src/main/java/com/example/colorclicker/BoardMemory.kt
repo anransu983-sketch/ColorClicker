@@ -296,14 +296,17 @@ object BoardMemory {
     // 没有新怪，但每只怪都还在原排。bot 在这帧上选点，点击落下时盘面刚好上移，落点换成了下面一排的怪（或空地）——
     // 下一轮“点后核实”里 surv=整伙、额外消失 1~2 格，就是点到了邻居；作废的那次点击其实是真的清掉了。
     /** 返回 null = 不是半截帧；否则 (原排吻合格数, 期望只数, 上移后吻合格数)。要求：刚点过、原排吻合 ≥60%、
-     *  明显比上移后吻合多（>2 倍）、且总只数没比期望多出 2 只以上（有新怪 = 已经上移过了）。 */
+     *  明显比上移后吻合多（>2 倍）、且总只数没比期望多出 8 只以上。
+     *  0.71：上限 2→8——Claude 核 61/62 局日志证实新刷的一行（6 只）会先于老怪上移出现，
+     *  实际只数 = 期望 + 6 左右仍是半截帧；+2 会把它误判成已上移，决策做到偏一行的盘面上。
+     *  真正的区分靠原排吻合 vs 上移后吻合（same > shifted*2），只数上限只是防新一波的粗筛。 */
     fun unshiftedMatch(comps: List<Pair<String, Matcher.Comp>>): Triple<Int, Int, Int>? {
         if (pendingCasts == 0 || lastPicked.isEmpty() || prevActual.isEmpty()) return null
         val picked = lastPicked.toSet()
         val expect = prevActual.filter { it !in picked }
         if (expect.size < 3) return null
         val actual = comps.flatMap { (name, c) -> c.cells.ifEmpty { listOf(c.point) }.map { Cell(name, colOf(it.x), rowOfY(it.y)) } }
-        if (actual.isEmpty() || actual.size > expect.size + 2) return null
+        if (actual.isEmpty() || actual.size > expect.size + 8) return null
         val same = expect.count { e -> actual.any { it.type == e.type && it.col == e.col && it.row == e.row } }
         val shifted = predicted.count { p -> actual.any { it.type == p.type && it.col == p.col && it.row == p.row } }
         return if (same * 10 >= expect.size * 6 && same > shifted * 2) Triple(same, expect.size, shifted) else null
@@ -407,6 +410,15 @@ object BoardMemory {
             val goneTxt = if (gone.isEmpty()) "" else "；预测有而实测无 ${gone.size} 格：" +
                 gone.take(6).joinToString("、") { "${it.type.removePrefix("守卫-")}@${it.col}列${it.row}排" }
             AppLog.d("记忆", "棋盘预测校验：命中 $hit/${predicted.size} 格，新刷 $fresh 只$goneTxt")
+            // 0.71（Claude 提案 2）：gone 位移诊断——对每个 gone 格，找同列里没被预测到的同类新格，记行差 Δrow。
+            // 只记不改决策：若 Δrow 稳定为正，说明被点格上方的怪会下落（列内补位），模型要改。
+            if (gone.isNotEmpty()) {
+                val deltas = gone.mapNotNull { g ->
+                    actual.filter { a -> a.type == g.type && a.col == g.col && predicted.none { it.type == a.type && it.col == a.col && it.row == a.row } }
+                        .minByOrNull { abs(it.row - g.row) }?.let { it.row - g.row }
+                }
+                if (deltas.isNotEmpty()) AppLog.d("记忆", "gone 位移：${deltas.size}/${gone.size} 格在同列找到同类新格，Δrow 分布 ${deltas.groupingBy { it }.eachCount().toSortedMap()}（正=怪往下掉了）")
+            }
         }
         // 2. 近阈值漏数嫌疑：被点那伙旁边（上下左右）有同类怪，相似度略低于阈值，没被算进只数
         var sus = 0
