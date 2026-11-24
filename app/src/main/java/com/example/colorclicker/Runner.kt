@@ -270,6 +270,12 @@ object Runner {
             var nullLogged = false
             var clicks = 0
             var lastActAt = System.currentTimeMillis()
+            // 0.90：棋盘空了就先收悬浮窗，别等 Runner 25 秒停。用户 2026-11-24 指出小窗收得太慢：
+            // 战斗结束（棋盘空了）后 Runner 还要等满 25 秒无怪才停、才收窗，106/107 局末点到收窗约 30 秒，
+            // 小窗一直顶在挑战页上。改法：某轮整盘没找到怪（acted==false，且不是滑动/半截帧/点前复核
+            // 的 continue——那几条路怪还在，不计），立刻收窗；Runner 照旧等 25 秒确认战斗结束才停，
+            // 万一是新一波晚到（实测换波不产生空轮），下一轮点到怪就重新打开。 */
+            var overlayHiddenForZero = false
             try {
             while (isActive) {
                 var frame = ScreenGrabber.grab()
@@ -333,7 +339,19 @@ object Runner {
                 }
                 if (acted) {
                     lastActAt = System.currentTimeMillis()
+                    if (overlayHiddenForZero && !BoardOverlay.isShowing()) {
+                        overlayHiddenForZero = false
+                        withContext(Dispatchers.Main) { BoardOverlay.show(ctx) }
+                        AppLog.i("悬浮棋盘", "棋盘上又有怪了，重新打开悬浮棋盘")
+                    }
                 } else {
+                    // 0.90：这一轮没找到怪就先收窗，不等 25 秒停机。滑动/半截帧/点前复核的 continue
+                    // 不进这里（怪还在），所以到这里就是整盘真没找到怪。
+                    if (!overlayHiddenForZero) {
+                        overlayHiddenForZero = true
+                        BoardOverlay.hide()
+                        AppLog.i("悬浮棋盘", "这一轮没找到怪，先收起悬浮棋盘（Runner 继续等 25 秒确认战斗结束）")
+                    }
                     if (System.currentTimeMillis() - lastActAt >= AUTO_STOP_IDLE_MS) {
                         AppLog.i("服务", "连续 ${AUTO_STOP_IDLE_MS / 1000} 秒没有可点的怪，自动停止")
                         stop(); return@launch
