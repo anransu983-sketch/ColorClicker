@@ -13,8 +13,8 @@ android {
         applicationId = "com.example.colorclicker"
         minSdk = 30
         targetSdk = 34
-        versionCode = 105
-        versionName = "1.04"
+        versionCode = 106
+        versionName = "1.05"
         // 0.87 瘦身：只打包 arm64-v8a。OpenCV 的 libopencv_java4.so 自带 4 个 ABI
         //（x86_64 54MB＋x86 40MB＋arm64 20MB＋armeabi-v7a 14MB≈129MB，占包体 82%），
         // 而用户手机是 S26 Ultra（arm64），其余 3 个 ABI 永远用不上、白白占 111MB。

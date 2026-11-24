@@ -51,6 +51,7 @@ object Runner {
     private var staleRetries = 0
     @Volatile private var staleFlag = false
     @Volatile private var slidingFlag = false
+    @Volatile private var repeatSkipFlag = false
     /** 0.48 点前复核：选点后、发点击前再取一帧，只比“被点那伙周围一圈”和选点帧的差异；变化占比 > SETTLE_FRAC（沿用点后稳定的阈值，不新增阈值）
      *  = 盘面已经在动，取消这次点击、重扫。连续最多取消 PRETAP_MAX_ABORT 次，再变也放行（防怪物待机动画误报把轮次卡死）。
      *  PRETAP_RECHECK=false 可整段关掉。 */
@@ -264,7 +265,7 @@ object Runner {
             if (rules.isEmpty()) AppLog.w("服务", "没有启用的规则，不会执行任何点击")
             lastSig = ""; sameRounds = 0; noEffectStop = false; frozenRounds = 0; lastTapAt = 0L
             lastTapRuleId = null; lastTapPoint = null; lastTapBoardSig = ""; pendingBoardSig = ""; repeatSkips = 0; lastTapFrameSig = null
-            slideRetries = 0; slidingFlag = false; staleRetries = 0; staleFlag = false; zeroShotDone = false; zeroShots = 0; clearReplay()
+            slideRetries = 0; slidingFlag = false; staleRetries = 0; staleFlag = false; repeatSkipFlag = false; zeroShotDone = false; zeroShots = 0; clearReplay()
             preTapAborts = 0; pickDecidedAt = 0L; settleUnchanged = false
             BoardMemory.beginBattle(ctx)
             // 0.64：分局标记——每局开局打一行，日志页按这行把日志切成段、按局看。
@@ -316,6 +317,8 @@ object Runner {
                     if (noEffectStop) { stop(); return@launch }
                     if (slidingFlag) { slidingFlag = false; delay(SLIDE_RETRY_MS); continue }
                     if (staleFlag) { staleFlag = false; delay(STALE_RETRY_MS); continue }
+                    // 1.05：重复跳过只是读到旧帧，不是棋盘空了，等新画面，别走下面「没找到怪→立即停」。
+                    if (repeatSkipFlag) { repeatSkipFlag = false; delay(SLIDE_RETRY_MS); continue }
                     if (best != null) {
                         val refSig = sig(frame)
                         // 0.48 点前复核：选点帧之后画面又动了（扫→点这一小段里开始上移）就别点，重扫。
@@ -886,6 +889,7 @@ object Runner {
             repeatSkips++
             if (repeatSkips < 3) {
                 AppLog.d("匹配", "棋盘没变（与上次点 (${lastTapPoint!!.x},${lastTapPoint!!.y}) 时同一盘），跳过重复点，等新画面（第 $repeatSkips 次）")
+                repeatSkipFlag = true
                 return null
             }
             AppLog.w("匹配", "同一目标连跳 $repeatSkips 轮仍没变，放行重打 (${pick.comp.point.x},${pick.comp.point.y})")
