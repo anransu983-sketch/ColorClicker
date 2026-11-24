@@ -362,6 +362,17 @@ object BoardOverlay {
         // 只有 2 个 view，但结算屏上小窗还挂着满盘。removeViewImmediate 的 isAttachedToWindow
         // 可能是假成功、或 Surface 残留让最后一帧继续显示。先 GONE（画不出东西）再摘，双保险。
         r.visibility = View.GONE
+        // 0.95：摘之前先把窗口缩成 0x0＋透明——112 局证实 removeViewImmediate＋GONE＋800ms 复查
+        // 全套都说干净了，小窗还在挑战页上。缩窗不依赖摘除：就算 WindowManager 静默失败没摘掉，
+        // 0x0 的窗口在屏幕上也是 0 像素、画不出东西，等于立马收掉，不用等。
+        try {
+            val lp = r.layoutParams as? WindowManager.LayoutParams
+            if (lp != null) {
+                val shrunk = WindowManager.LayoutParams(lp).apply { width = 0; height = 0 }
+                wm?.updateViewLayout(r, shrunk)
+            }
+        } catch (_: Exception) { }
+        r.alpha = 0f
         var removed = false
         try {
             wm?.removeViewImmediate(r)
@@ -400,6 +411,8 @@ object BoardOverlay {
         if (removed) {
             // 0.84：顺带扫掉登记表里的孤儿（旧版留下的），免得“已移除”了小窗还在。
             wm?.let { sweepStaleViews(it) }
+            // 0.95：把刚摘的这个也从登记表里清掉（以前 sweep 会跳过 root，它一直赖在表里）。
+            synchronized(allViews) { allViews.remove(r) }
             // 0.93：800ms 后再复查一遍——hide() 的“已移除”在 111 局被截图证伪了。
             // 复查直接读 WindowManagerGlobal.mViews：小窗还在里面就再摘一次，并记日志定性。
             val wmCaptured = wm
