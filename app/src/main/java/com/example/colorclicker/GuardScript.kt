@@ -196,7 +196,20 @@ object GuardScript {
                 if (tappedAssist) {
                     if (Runner.startBattle(ctx)) {
                         AppLog.i("守卫", "已开跑，守卫脚本交棒给消消乐，等本局打完")
-                        while (isActive && Runner.isRunning()) delay(1000)
+                        // 1.03：战斗中每秒看一眼屏幕是不是已离开游戏（挑战页/结算屏），是就立马收悬浮棋盘，
+                        // 不等 Runner 下一轮扫描——Runner 点后等上移能拖约 10 秒，这段时间屏早回了挑战页、
+                        // 小窗还挂着（用户 11:37:53/11:38:47/11:39:55 三张截图 EXIF 实证，都是末点后 3–6 秒、
+                        // 零轮扫描之前拍的）。挑战页开始按钮和结算标题在战斗中不可能出现，不会误收；
+                        // 真误收了 Runner 下一轮找到怪也会自己重新打开。
+                        while (isActive && Runner.isRunning()) {
+                            val f = ScreenGrabber.grab()
+                            if (f != null) {
+                                val back = Matcher.findImage(f, tplStart, 0.8, listOf(900, 550, 540, 400)) != null
+                                val settled = tplEnd != null && Matcher.findImage(f, tplEnd, 0.75, null) != null
+                                if (back || settled) BoardOverlay.hide()
+                            }
+                            delay(1000)
+                        }
                         // 0.36 自裁标题图：第 22 局回退 0/0/0——包里的标题图（00:27 结算截图
                         // 裁的、放大回原生）5 轮都没对上。原因未定（放大模糊、那局结算屏长得
                         // 不一样都有可能），但现成帧就在手里：回挑战页之前先从当前帧按结算
