@@ -355,6 +355,10 @@ object BoardOverlay {
             return
         }
         BoardOverlayState.removeListener(listener)
+        // 0.93：先把 view 藏起来再摘——用户 111 局截图证实，hide() 日志说摘掉了、WM dump 也说
+        // 只有 2 个 view，但结算屏上小窗还挂着满盘。removeViewImmediate 的 isAttachedToWindow
+        // 可能是假成功、或 Surface 残留让最后一帧继续显示。先 GONE（画不出东西）再摘，双保险。
+        r.visibility = View.GONE
         var removed = false
         try {
             wm?.removeViewImmediate(r)
@@ -393,6 +397,29 @@ object BoardOverlay {
         if (removed) {
             // 0.84：顺带扫掉登记表里的孤儿（旧版留下的），免得“已移除”了小窗还在。
             wm?.let { sweepStaleViews(it) }
+            // 0.93：800ms 后再复查一遍——hide() 的“已移除”在 111 局被截图证伪了。
+            // 复查直接读 WindowManagerGlobal.mViews：小窗还在里面就再摘一次，并记日志定性。
+            val wmCaptured = wm
+            val viewCaptured = r
+            mainHandler.postDelayed({
+                try {
+                    val wmgClass = Class.forName("android.view.WindowManagerGlobal")
+                    val wmg = wmgClass.getDeclaredMethod("getInstance").invoke(null)
+                    val mViewsField = wmgClass.getDeclaredField("mViews").apply { isAccessible = true }
+                    @Suppress("UNCHECKED_CAST")
+                    val views = mViewsField.get(wmg) as ArrayList<View>
+                    if (views.any { it === viewCaptured }) {
+                        AppLog.w("悬浮棋盘", "hide() 800ms 后复查：小窗还在 WindowManager 里，再摘一次")
+                        try { wmCaptured?.removeViewImmediate(viewCaptured) } catch (_: Exception) { }
+                        if (!viewCaptured.isAttachedToWindow) AppLog.i("悬浮棋盘", "hide() 复查重摘成功")
+                        else AppLog.e("悬浮棋盘", "hide() 复查重摘后 view 还贴着（真·摘不掉）")
+                    } else {
+                        AppLog.d("悬浮棋盘", "hide() 800ms 后复查：小窗已不在，干净")
+                    }
+                } catch (e: Exception) {
+                    AppLog.e("悬浮棋盘", "hide() 复查失败：${e.message}")
+                }
+            }, 800)
             root = null; wm = null; headerText = null; boardView = null
             hideFailed = false
             hideRetries = 0
