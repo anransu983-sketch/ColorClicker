@@ -273,7 +273,8 @@ object FloatBoard {
     private fun watchTick() {
         val f = ScreenGrabber.grab() ?: return
         val start = tplStart
-        val back = start != null && Matcher.findImage(f, start, 0.8, listOf(900, 550, 540, 400)) != null
+        // 1.06：全帧找开始按钮——挑战页会滚动，按钮 y 随滚动变，固定 (900,550,540,400) 在她实机截图上只得 0.634（阈值 0.8 认不到）；全帧得 0.872。
+        val back = start != null && Matcher.findImage(f, start, 0.8, null) != null
         if (back) {
             hideWindow()
             return
@@ -292,6 +293,9 @@ object FloatBoard {
     }
 
     private fun showWindow() {
+        // 1.06：只在看屏协程还活着时才显示。停机瞬间若有一拍 watchTick 还在跑，它会在
+        // stopWatching 收窗之后又把窗顶回来，变孤儿；协程已取消就不再显示。
+        if (watchJob?.isActive != true) return
         if (Looper.myLooper() != Looper.getMainLooper()) {
             mainHandler.post { showWindow() }
             return

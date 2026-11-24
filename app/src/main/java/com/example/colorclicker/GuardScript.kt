@@ -230,7 +230,8 @@ object GuardScript {
                         // 再按返回键、最后点面板 (802,1617) 兜底。
                         fun isBack(): Boolean {
                             val f = ScreenGrabber.grab()
-                            return f != null && Matcher.findImage(f, tplStart, 0.8, listOf(900, 550, 540, 400)) != null
+                            // 1.06：全帧找开始按钮（同 FloatBoard：固定区域在她实机截图上只得 0.634，认不到挑战页，退出流程多按返回键退出了游戏）
+                            return f != null && Matcher.findImage(f, tplStart, 0.8, null) != null
                         }
                         fun onSettle(): Boolean {
                             val f = ScreenGrabber.grab() ?: return false
