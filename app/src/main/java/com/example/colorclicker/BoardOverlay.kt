@@ -223,6 +223,30 @@ object BoardOverlay {
         }
         if (swept > 0) AppLog.w("悬浮棋盘", "sweep 清掉 $swept 个孤儿 view")
     }
+
+    /** 0.85：直接读 WindowManagerGlobal.mViews（反射），看看到底哪些 view 还贴在窗口上——
+     * 0.84 的登记表扫不到的东西，这个能看见。用户 2026-11-24 实证：97 局跑在 0.84 上，
+     * hide() 写“已移除”且 root 已空，小窗仍挂在挑战页上——登记表里没有的 view 只有这能查到。 */
+    private fun dumpWmViews(tag: String) {
+        try {
+            val wmgClass = Class.forName("android.view.WindowManagerGlobal")
+            val wmg = wmgClass.getDeclaredMethod("getInstance").invoke(null)
+            val mViewsField = wmgClass.getDeclaredField("mViews").apply { isAccessible = true }
+            @Suppress("UNCHECKED_CAST")
+            val views = mViewsField.get(wmg) as ArrayList<View>
+            val sb = StringBuilder("WM dump [$tag]：本进程共 ${views.size} 个悬浮窗 view")
+            for ((i, v) in views.withIndex()) {
+                sb.append("\n  #").append(i).append(" ").append(v.javaClass.name)
+                    .append(" attached=").append(v.isAttachedToWindow)
+                    .append(" vis=").append(v.visibility)
+                    .append(" isRoot=").append(v == root)
+                    .append(" inAll=").append(allViews.contains(v))
+            }
+            AppLog.w("悬浮棋盘", sb.toString())
+        } catch (e: Exception) {
+            AppLog.e("悬浮棋盘", "WM dump 失败：${e.message}")
+        }
+    }
     private val listener: (BoardSnapshot) -> Unit = { snap ->
         headerText?.text = if (!snap.running) "悬浮棋盘 · 未运行"
         else if (snap.pickName.isEmpty()) "悬浮棋盘 · 等待识别"
@@ -306,6 +330,8 @@ object BoardOverlay {
         manager.addView(rootView, params)
         root = rootView; wm = manager; headerText = header; boardView = board
         allViews.add(rootView)
+        AppLog.d("悬浮棋盘", "show() v0.85 已建新窗")
+        dumpWmViews("show后")
         BoardOverlayState.addListener(listener)
         listener(BoardOverlayState.latest)
         return true
@@ -324,6 +350,8 @@ object BoardOverlay {
         val r = root
         if (r == null) {
             AppLog.d("悬浮棋盘", "hide() 已是空，没什么可收")
+            // 0.85：root 已空但用户说小窗还在——直接查 WindowManager 里到底还贴着什么。
+            dumpWmViews("hide时root已空")
             return
         }
         BoardOverlayState.removeListener(listener)
@@ -368,6 +396,8 @@ object BoardOverlay {
             root = null; wm = null; headerText = null; boardView = null
             hideFailed = false
             hideRetries = 0
+            // 0.85：摘完再查一遍 WindowManager，确认真的干净了。
+            dumpWmViews("hide摘完后")
         } else {
             // 移除失败：保留引用，下次 show()/hide() 会重试；同时 500ms 后再试一次，
             // 免得只靠下次调用才收（用户看到的就是“结束了收不回去”）。最多再试 3 次，
