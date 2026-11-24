@@ -208,25 +208,31 @@ object BoardOverlay {
     // 按 tag 扫 mViews 才能把它清掉。
     private const val ROOT_TAG = "BoardOverlayRoot"
 
-    /** 0.99：按 mViews 里的 tag 清掉所有 BoardOverlay 窗（含 root 之外的孤儿）。 */
+    /** 0.99：按 mViews 里的 tag 清掉所有 BoardOverlay 窗（含 root 之外的孤儿）。1.01：不管清掉几个都记日志，免得 0 命中时看不出它到底跑没跑。 */
     private fun removeTaggedOverlays(manager: WindowManager?): Int {
         var n = 0
+        var checked = 0
+        var failed: String? = null
         try {
             val wmgClass = Class.forName("android.view.WindowManagerGlobal")
             val wmg = wmgClass.getDeclaredMethod("getInstance").invoke(null)
             val mViewsField = wmgClass.getDeclaredField("mViews").apply { isAccessible = true }
             @Suppress("UNCHECKED_CAST")
             val views = mViewsField.get(wmg) as ArrayList<View>
+            checked = views.size
             for (v in views.toList()) {
                 if (v.tag == ROOT_TAG && v.isAttachedToWindow) {
                     try {
-                        manager?.removeViewImmediate(v)
+                        // 1.01：manager 可能已空（root 空时 wm 也空），用 view 自己的 context 拿 WindowManager 兜底。
+                        val mgr = manager ?: (v.context.getSystemService(Context.WINDOW_SERVICE) as? WindowManager)
+                        mgr?.removeViewImmediate(v)
                         if (!v.isAttachedToWindow) n++
-                    } catch (_: Exception) { }
+                        else failed = "removeViewImmediate 后 view 还贴着 tag=$ROOT_TAG"
+                    } catch (e: Exception) { failed = "摘 tag 窗抛异常：${e.message}" }
                 }
             }
-        } catch (_: Exception) { }
-        if (n > 0) AppLog.w("悬浮棋盘", "按 tag 清掉 $n 个 BoardOverlay 窗（含孤儿）")
+        } catch (e: Exception) { failed = "反射 mViews 失败：${e.message}" }
+        AppLog.w("悬浮棋盘", "按 tag 清扫：查了 $checked 个 view，清掉 $n 个${if (failed != null) "，失败：$failed" else ""}")
         return n
     }
 
@@ -248,22 +254,30 @@ object BoardOverlay {
 
     private fun removeOrphanBoardsByContent(manager: WindowManager?): Int {
         var n = 0
+        var checked = 0
+        var matched = 0
+        var failed: String? = null
         try {
             val wmgClass = Class.forName("android.view.WindowManagerGlobal")
             val wmg = wmgClass.getDeclaredMethod("getInstance").invoke(null)
             val mViewsField = wmgClass.getDeclaredField("mViews").apply { isAccessible = true }
             @Suppress("UNCHECKED_CAST")
             val views = mViewsField.get(wmg) as ArrayList<View>
+            checked = views.size
             for (v in views.toList()) {
                 if (v !== root && v.isAttachedToWindow && isBoardOverlayWindow(v)) {
+                    matched++
                     try {
-                        manager?.removeViewImmediate(v)
+                        // 1.01：manager 可能已空，用 view 自己的 context 拿 WindowManager 兜底。
+                        val mgr = manager ?: (v.context.getSystemService(Context.WINDOW_SERVICE) as? WindowManager)
+                        mgr?.removeViewImmediate(v)
                         if (!v.isAttachedToWindow) n++
-                    } catch (_: Exception) { }
+                        else failed = "按内容摘掉后 view 还贴着"
+                    } catch (e: Exception) { failed = "按内容摘抛异常：${e.message}" }
                 }
             }
-        } catch (_: Exception) { }
-        if (n > 0) AppLog.w("悬浮棋盘", "按内容清掉 $n 个无 tag 的旧孤儿棋盘窗")
+        } catch (e: Exception) { failed = "反射 mViews 失败：${e.message}" }
+        AppLog.w("悬浮棋盘", "按内容清扫：查了 $checked 个 view，认出棋盘窗 $matched 个，清掉 $n 个${if (failed != null) "，失败：$failed" else ""}")
         return n
     }
     // 0.84：登记所有建过的悬浮窗 view，hide() 成功时顺带扫掉已脱离引用的孤儿——
@@ -288,9 +302,7 @@ object BoardOverlay {
         if (swept > 0) AppLog.w("悬浮棋盘", "sweep 清掉 $swept 个孤儿 view")
     }
 
-    /** 0.85：直接读 WindowManagerGlobal.mViews（反射），看看到底哪些 view 还贴在窗口上——
-     * 0.84 的登记表扫不到的东西，这个能看见。用户 2026-11-24 实证：97 局跑在 0.84 上，
-     * hide() 写“已移除”且 root 已空，小窗仍挂在挑战页上——登记表里没有的 view 只有这能查到。 */
+    /** 1.01：dump 每个 view 加 tag、是不是棋盘窗、标题文案——之前只记类名，分不清那个 LinearLayout 是棋盘窗还是工具栏，1.00 认不出来就白清了。 */
     private fun dumpWmViews(tag: String) {
         try {
             val wmgClass = Class.forName("android.view.WindowManagerGlobal")
@@ -305,11 +317,26 @@ object BoardOverlay {
                     .append(" vis=").append(v.visibility)
                     .append(" isRoot=").append(v == root)
                     .append(" inAll=").append(allViews.contains(v))
+                    .append(" tag=").append(v.tag)
+                    .append(" 是棋盘=").append(isBoardOverlayWindow(v))
+                    .append(" 标题=").append(findHeaderText(v))
             }
             AppLog.w("悬浮棋盘", sb.toString())
         } catch (e: Exception) {
             AppLog.e("悬浮棋盘", "WM dump 失败：${e.message}")
         }
+    }
+
+    /** 1.01：找出一个 view 子树里第一个 TextView 的文案（棋盘窗标题就是它）。 */
+    private fun findHeaderText(v: View): String {
+        if (v is TextView) return v.text?.toString() ?: ""
+        if (v is ViewGroup) {
+            for (i in 0 until v.childCount) {
+                val t = findHeaderText(v.getChildAt(i))
+                if (t.isNotEmpty()) return t
+            }
+        }
+        return ""
     }
     private val listener: (BoardSnapshot) -> Unit = { snap ->
         headerText?.text = if (!snap.running) "悬浮棋盘 · 未运行"
@@ -421,9 +448,13 @@ object BoardOverlay {
         }
         val r = root
         if (r == null) {
-            AppLog.d("悬浮棋盘", "hide() 已是空，没什么可收")
-            // 0.85：root 已空但用户说小窗还在——直接查 WindowManager 里到底还贴着什么。
-            dumpWmViews("hide时root已空")
+            // 1.01：root 已空不等于没窗——屏幕上那个可能是孤儿，之前这条分支直接 return，
+            // 清扫一次都不跑，孤儿永远收不回去。现在 root 空也照样扫一遍 mViews。
+            AppLog.d("悬浮棋盘", "hide() root 已空，仍扫一遍 mViews 清孤儿")
+            dumpWmViews("hide时root已空-扫前")
+            removeTaggedOverlays(wm)
+            removeOrphanBoardsByContent(wm)
+            dumpWmViews("hide时root已空-扫后")
             return
         }
         BoardOverlayState.removeListener(listener)
