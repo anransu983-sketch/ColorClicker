@@ -187,58 +187,22 @@ class BoardView(ctx: Context) : View(ctx) {
     }
 }
 
-/** 悬浮窗管理：显示/隐藏迷你棋盘（WindowManager 悬浮窗，复用 CaptureService 工具栏那套参数）。 */
+/** 悬浮窗管理：1.02 重做——窗口只建一次、永不摘除，显示/隐藏只改 visibility。
+ * 旧版每局 addView/removeView，removeViewImmediate 静默失败就留孤儿，
+ * 0.93–1.01 补了三层清扫都没根治（1.00 在 115 局仍留窗）。
+ * 新设计从根上断掉孤儿：WindowManager 里永远只有一个棋盘窗，hide() 只是 GONE，
+ * 不摘除就不存在“摘不掉”；旧孤儿只在第一次 show() 时清一次，之后再也不会产生。 */
 object BoardOverlay {
     private var root: LinearLayout? = null
     private var wm: WindowManager? = null
     private var headerText: TextView? = null
     private var boardView: BoardView? = null
-    // 0.81：hide() 失败时不再丢引用——removeViewImmediate/removeView 抛异常或静默失败后，
-    // 旧 view 仍挂在屏幕上、root 却已置空，下次 show() 会另建一个新 view，旧的永远收不回去
-    // （用户 2026-11-24 实证：结束后小窗时不时留在挑战页上）。失败时保留引用，靠重试收回。
-    // 0.83：0.81 只防了抛异常，没防静默失败——removeViewImmediate 不抛异常也可能没摘掉 view
-    // （用户 2026-11-24 07:56 两张截图实证：日志写“已移除”，小窗仍在挑战页上）。
-    // 改成以 isAttachedToWindow 为准：摘完还贴着就是没摘掉，保留引用重试。
-    private var hideFailed = false
-    private var hideRetries = 0
     private val mainHandler = Handler(Looper.getMainLooper())
-    // 0.99：给每个棋盘窗打 tag——114 局实证：hide() 的 dump 显示 mViews 里仍有 1 个
-    // LinearLayout 贴着（vis=0），而 800ms 复查却说 root 已不在（“干净”）——两者矛盾，
-    // 说明屏幕上的窗不是 root，是之前某局留下的孤儿，hide() 只摘 root 永远摸不到它。
-    // 按 tag 扫 mViews 才能把它清掉。
     private const val ROOT_TAG = "BoardOverlayRoot"
+    /** 旧孤儿只清一次（第一次 show 时），新设计不再产生孤儿，不用每局扫。 */
+    private var orphanCleaned = false
 
-    /** 0.99：按 mViews 里的 tag 清掉所有 BoardOverlay 窗（含 root 之外的孤儿）。1.01：不管清掉几个都记日志，免得 0 命中时看不出它到底跑没跑。 */
-    private fun removeTaggedOverlays(manager: WindowManager?): Int {
-        var n = 0
-        var checked = 0
-        var failed: String? = null
-        try {
-            val wmgClass = Class.forName("android.view.WindowManagerGlobal")
-            val wmg = wmgClass.getDeclaredMethod("getInstance").invoke(null)
-            val mViewsField = wmgClass.getDeclaredField("mViews").apply { isAccessible = true }
-            @Suppress("UNCHECKED_CAST")
-            val views = mViewsField.get(wmg) as ArrayList<View>
-            checked = views.size
-            for (v in views.toList()) {
-                if (v.tag == ROOT_TAG && v.isAttachedToWindow) {
-                    try {
-                        // 1.01：manager 可能已空（root 空时 wm 也空），用 view 自己的 context 拿 WindowManager 兜底。
-                        val mgr = manager ?: (v.context.getSystemService(Context.WINDOW_SERVICE) as? WindowManager)
-                        mgr?.removeViewImmediate(v)
-                        if (!v.isAttachedToWindow) n++
-                        else failed = "removeViewImmediate 后 view 还贴着 tag=$ROOT_TAG"
-                    } catch (e: Exception) { failed = "摘 tag 窗抛异常：${e.message}" }
-                }
-            }
-        } catch (e: Exception) { failed = "反射 mViews 失败：${e.message}" }
-        AppLog.w("悬浮棋盘", "按 tag 清扫：查了 $checked 个 view，清掉 $n 个${if (failed != null) "，失败：$failed" else ""}")
-        return n
-    }
-
-    /** 1.00：按内容清掉无 tag 的旧孤儿——屏幕上现在那个就是 0.99 之前建的，根本没打 tag，
-     * 只按 tag 扫永远摸不到它。棋盘窗的标题一定是“要点「X」N只”或“悬浮棋盘 · …”，
-     * 工具栏没有这种文案，按这个认不会误伤。 */
+    /** 棋盘窗的标题一定是“要点「X」N只”或“悬浮棋盘 · …”，工具栏没有这种文案，按这个认不会误伤。 */
     private fun isBoardOverlayWindow(v: View): Boolean {
         if (v is TextView) {
             val t = v.text?.toString() ?: ""
@@ -252,92 +216,31 @@ object BoardOverlay {
         return false
     }
 
-    private fun removeOrphanBoardsByContent(manager: WindowManager?): Int {
-        var n = 0
-        var checked = 0
-        var matched = 0
-        var failed: String? = null
+    /** 一次性清掉旧版留下的孤儿窗（按 tag 和按内容各扫一遍），只在第一次 show() 时跑。 */
+    private fun cleanOldOrphans(manager: WindowManager) {
+        var removed = 0
         try {
             val wmgClass = Class.forName("android.view.WindowManagerGlobal")
             val wmg = wmgClass.getDeclaredMethod("getInstance").invoke(null)
             val mViewsField = wmgClass.getDeclaredField("mViews").apply { isAccessible = true }
             @Suppress("UNCHECKED_CAST")
             val views = mViewsField.get(wmg) as ArrayList<View>
-            checked = views.size
             for (v in views.toList()) {
-                if (v !== root && v.isAttachedToWindow && isBoardOverlayWindow(v)) {
-                    matched++
-                    try {
-                        // 1.01：manager 可能已空，用 view 自己的 context 拿 WindowManager 兜底。
-                        val mgr = manager ?: (v.context.getSystemService(Context.WINDOW_SERVICE) as? WindowManager)
-                        mgr?.removeViewImmediate(v)
-                        if (!v.isAttachedToWindow) n++
-                        else failed = "按内容摘掉后 view 还贴着"
-                    } catch (e: Exception) { failed = "按内容摘抛异常：${e.message}" }
-                }
+                if (v === root) continue
+                if (!v.isAttachedToWindow) continue
+                if (v.tag != ROOT_TAG && !isBoardOverlayWindow(v)) continue
+                try {
+                    val mgr = v.context.getSystemService(Context.WINDOW_SERVICE) as? WindowManager ?: manager
+                    mgr.removeViewImmediate(v)
+                    if (!v.isAttachedToWindow) removed++
+                } catch (_: Exception) { }
             }
-        } catch (e: Exception) { failed = "反射 mViews 失败：${e.message}" }
-        AppLog.w("悬浮棋盘", "按内容清扫：查了 $checked 个 view，认出棋盘窗 $matched 个，清掉 $n 个${if (failed != null) "，失败：$failed" else ""}")
-        return n
-    }
-    // 0.84：登记所有建过的悬浮窗 view，hide() 成功时顺带扫掉已脱离引用的孤儿——
-    // 0.83 只能防新孤儿，已经孤儿化的旧 view（root 早被旧版置空）摸不到，
-    // 只能靠启动新局/结束时扫一遍全量登记表才能清掉（用户 2026-11-24 08:09 截图：
-    // 0.83 下小窗仍挂在挑战页上，hide() 日志却写“已移除”——旧孤儿与新 view 不是同一个）。
-    private val allViews = mutableListOf<View>()
-
-    /** 扫掉登记表里所有“不是当前 root、还贴在窗口上”的 view（孤儿），顺带清掉已脱离的登记。 */
-    private fun sweepStaleViews(manager: WindowManager) {
-        var swept = 0
-        for (v in allViews.toList()) {
-            if (v == root) continue
-            if (!v.isAttachedToWindow) { allViews.remove(v); continue }
-            try {
-                manager.removeViewImmediate(v)
-                if (!v.isAttachedToWindow) { allViews.remove(v); swept++ }
-            } catch (_: Exception) {
-                // 摘不掉就留着，下次再扫
-            }
-        }
-        if (swept > 0) AppLog.w("悬浮棋盘", "sweep 清掉 $swept 个孤儿 view")
-    }
-
-    /** 1.01：dump 每个 view 加 tag、是不是棋盘窗、标题文案——之前只记类名，分不清那个 LinearLayout 是棋盘窗还是工具栏，1.00 认不出来就白清了。 */
-    private fun dumpWmViews(tag: String) {
-        try {
-            val wmgClass = Class.forName("android.view.WindowManagerGlobal")
-            val wmg = wmgClass.getDeclaredMethod("getInstance").invoke(null)
-            val mViewsField = wmgClass.getDeclaredField("mViews").apply { isAccessible = true }
-            @Suppress("UNCHECKED_CAST")
-            val views = mViewsField.get(wmg) as ArrayList<View>
-            val sb = StringBuilder("WM dump [$tag]：本进程共 ${views.size} 个悬浮窗 view")
-            for ((i, v) in views.withIndex()) {
-                sb.append("\n  #").append(i).append(" ").append(v.javaClass.name)
-                    .append(" attached=").append(v.isAttachedToWindow)
-                    .append(" vis=").append(v.visibility)
-                    .append(" isRoot=").append(v == root)
-                    .append(" inAll=").append(allViews.contains(v))
-                    .append(" tag=").append(v.tag)
-                    .append(" 是棋盘=").append(isBoardOverlayWindow(v))
-                    .append(" 标题=").append(findHeaderText(v))
-            }
-            AppLog.w("悬浮棋盘", sb.toString())
         } catch (e: Exception) {
-            AppLog.e("悬浮棋盘", "WM dump 失败：${e.message}")
+            AppLog.e("悬浮棋盘", "清旧孤儿失败：${e.message}")
         }
+        if (removed > 0) AppLog.w("悬浮棋盘", "首次建窗清掉 $removed 个旧孤儿棋盘窗")
     }
 
-    /** 1.01：找出一个 view 子树里第一个 TextView 的文案（棋盘窗标题就是它）。 */
-    private fun findHeaderText(v: View): String {
-        if (v is TextView) return v.text?.toString() ?: ""
-        if (v is ViewGroup) {
-            for (i in 0 until v.childCount) {
-                val t = findHeaderText(v.getChildAt(i))
-                if (t.isNotEmpty()) return t
-            }
-        }
-        return ""
-    }
     private val listener: (BoardSnapshot) -> Unit = { snap ->
         headerText?.text = if (!snap.running) "悬浮棋盘 · 未运行"
         else if (snap.pickName.isEmpty()) "悬浮棋盘 · 等待识别"
@@ -345,30 +248,38 @@ object BoardOverlay {
         boardView?.invalidate()
     }
 
-    fun isShowing() = root != null
+    fun isShowing() = root?.visibility == View.VISIBLE
 
     fun show(ctx: Context): Boolean {
+        if (Looper.myLooper() != Looper.getMainLooper()) {
+            mainHandler.post { show(ctx) }
+            return true
+        }
         val cur = root
         if (cur != null) {
-            // 0.83：root 非空但 view 已不在窗口上（上次 hide() 静默失败后 root 被置空又重建之类），
-            // 引用是死的，清掉重建；否则 show() 返回 true 却什么都没显示。
-            if (!cur.isAttachedToWindow) {
-                AppLog.w("悬浮棋盘", "show() 发现 root 已脱离窗口，清掉引用重建")
-                root = null; wm = null; headerText = null; boardView = null
-                hideFailed = false; hideRetries = 0
-            } else if (hideFailed) {
-                // 0.81：上次 hide() 失败留下的孤儿 view 仍在屏幕上，先把它收掉再建新的，
-                // 否则新旧两个 view 叠在一起、旧的永远收不回去。
-                AppLog.w("悬浮棋盘", "show() 发现上次 hide() 失败留下的 view，先强制收回")
-                hide()
-                if (root != null) return false
-            } else {
-                return true
+            // 窗口已存在——只改成可见，不建新窗。旧版这里会另建一个，新旧叠加就是孤儿的来源。
+            if (cur.visibility != View.VISIBLE) {
+                cur.visibility = View.VISIBLE
+                cur.alpha = 1f
+                val lp = cur.layoutParams as? WindowManager.LayoutParams
+                if (lp != null && (lp.width == 0 || lp.height == 0)) {
+                    lp.width = WindowManager.LayoutParams.WRAP_CONTENT
+                    lp.height = WindowManager.LayoutParams.WRAP_CONTENT
+                    wm?.updateViewLayout(cur, lp)
+                }
             }
+            BoardOverlayState.addListener(listener)
+            listener(BoardOverlayState.latest)
+            return true
         }
         if (!Settings.canDrawOverlays(ctx)) return false
         val appCtx = ctx.applicationContext
         val manager = appCtx.getSystemService(Context.WINDOW_SERVICE) as WindowManager
+        // 第一次建窗：先把旧版留下的孤儿清掉，再建自己的唯一一个窗。
+        if (!orphanCleaned) {
+            orphanCleaned = true
+            cleanOldOrphans(manager)
+        }
         val header = TextView(appCtx).apply {
             text = "悬浮棋盘 · 未运行"
             setTextColor(Color.WHITE)
@@ -400,11 +311,7 @@ object BoardOverlay {
             WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY,
             WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE or WindowManager.LayoutParams.FLAG_LAYOUT_NO_LIMITS,
             PixelFormat.TRANSLUCENT
-        // 0.94：默认放顶部居中——用户 2026-11-24：左上角（x=20）挡住左上角分数了。
-        // 原来每局 show() 都重置回 x=20，拖走也没用，下局又挡回来。改居中后默认不挡分数，
-        // 仍可按标题拖动（拖动逻辑不变，x 变成相对中心点的偏移）。
         ).apply { gravity = Gravity.TOP or Gravity.CENTER_HORIZONTAL; x = 0; y = 60 }
-        // 拖动：按住标题文字拖整个窗（关闭按钮仍可点）
         var dx = 0f; var dy = 0f; var sx = 0; var sy = 0; var moved = false
         header.setOnTouchListener { _, e ->
             when (e.action) {
@@ -420,157 +327,33 @@ object BoardOverlay {
             }
             true
         }
-        // 0.84：建新窗前先扫一遍登记表，把旧版留下的孤儿清掉（否则新旧叠在一起）。
-        sweepStaleViews(manager)
-        // 0.99：登记表里没有的孤儿（root 早被旧版置空）扫不到，按 tag 扫 mViews 再清一遍。
-        removeTaggedOverlays(manager)
-        // 1.00：0.99 之前的孤儿没打 tag，按内容再清一遍（认标题“要点「X」N只”/“悬浮棋盘”）。
-        removeOrphanBoardsByContent(manager)
         manager.addView(rootView, params)
         root = rootView; wm = manager; headerText = header; boardView = board
-        allViews.add(rootView)
-        AppLog.d("悬浮棋盘", "show() v0.85 已建新窗")
-        dumpWmViews("show后")
         BoardOverlayState.addListener(listener)
         listener(BoardOverlayState.latest)
+        AppLog.d("悬浮棋盘", "show() 已建唯一棋盘窗（1.02 起只建一次）")
         return true
     }
 
     fun hide() {
-        // 0.74：0.70 的 removeView 在 Runner.stop()/finally/GuardScript.stop() 三处调用后小窗仍留着（63 局实证），
-        // 疑静默失败；改 removeViewImmediate 立即移除并记日志，下局看日志定性。
-        // 0.81：removeViewImmediate/removeView 失败时不再丢引用——失败就保留 root/wm，记 hideFailed，
-        // 下次 show()/hide() 再试；成功才置空。否则 view 孤儿化、永远收不回去。
         if (Looper.myLooper() != Looper.getMainLooper()) {
-            AppLog.d("悬浮棋盘", "hide() 后台线程，已转主线程")
             mainHandler.post { hide() }
             return
         }
-        val r = root
-        if (r == null) {
-            // 1.01：root 已空不等于没窗——屏幕上那个可能是孤儿，之前这条分支直接 return，
-            // 清扫一次都不跑，孤儿永远收不回去。现在 root 空也照样扫一遍 mViews。
-            AppLog.d("悬浮棋盘", "hide() root 已空，仍扫一遍 mViews 清孤儿")
-            dumpWmViews("hide时root已空-扫前")
-            removeTaggedOverlays(wm)
-            removeOrphanBoardsByContent(wm)
-            dumpWmViews("hide时root已空-扫后")
-            return
-        }
+        val r = root ?: return
         BoardOverlayState.removeListener(listener)
-        // 0.93：先把 view 藏起来再摘——用户 111 局截图证实，hide() 日志说摘掉了、WM dump 也说
-        // 只有 2 个 view，但结算屏上小窗还挂着满盘。removeViewImmediate 的 isAttachedToWindow
-        // 可能是假成功、或 Surface 残留让最后一帧继续显示。先 GONE（画不出东西）再摘，双保险。
+        // 1.02：只设 GONE，不 removeView——窗口永不摘除，就不可能摘不掉、留孤儿。
+        // GONE 的 view 不画东西、不收触摸，屏幕上等于完全消失。
         r.visibility = View.GONE
-        // 0.95：摘之前先把窗口缩成 0x0＋透明——112 局证实 removeViewImmediate＋GONE＋800ms 复查
-        // 全套都说干净了，小窗还在挑战页上。缩窗不依赖摘除：就算 WindowManager 静默失败没摘掉，
-        // 0x0 的窗口在屏幕上也是 0 像素、画不出东西，等于立马收掉，不用等。
-        // 0.97 修：不用 LayoutParams(lp) 拷贝构造（该构造在编译期解析不到），直接改现成的 lp 再 update。
-        try {
-            val lp = r.layoutParams as? WindowManager.LayoutParams
-            if (lp != null) {
-                lp.width = 0
-                lp.height = 0
-                wm?.updateViewLayout(r, lp)
-                AppLog.d("悬浮棋盘", "hide() 已把窗口缩成 0x0（立马收）")
-            } else {
-                AppLog.w("悬浮棋盘", "hide() 缩窗失败：layoutParams 不是 WindowManager.LayoutParams")
-            }
-        } catch (e: Exception) {
-            AppLog.w("悬浮棋盘", "hide() 缩窗失败：${e.message}")
-        }
-        r.alpha = 0f
-        var removed = false
-        try {
-            wm?.removeViewImmediate(r)
-            // 0.83：removeViewImmediate 不抛异常也可能没摘掉（静默失败），以 isAttachedToWindow 为准。
-            if (!r.isAttachedToWindow) {
-                AppLog.d("悬浮棋盘", "hide() 已移除（removeViewImmediate）")
-                removed = true
-            } else {
-                AppLog.w("悬浮棋盘", "hide() removeViewImmediate 未抛异常但 view 还贴着，改 removeView")
-                try {
-                    wm?.removeView(r)
-                    if (!r.isAttachedToWindow) {
-                        AppLog.d("悬浮棋盘", "hide() 已移除（removeView 兜底）")
-                        removed = true
-                    } else {
-                        AppLog.e("悬浮棋盘", "hide() removeView 后 view 还贴着，保留引用等重试")
-                    }
-                } catch (e2: Exception) {
-                    AppLog.e("悬浮棋盘", "hide() removeView 也失败：${e2.message}，保留引用等下次重试")
-                }
-            }
-        } catch (e: Exception) {
-            AppLog.w("悬浮棋盘", "hide() removeViewImmediate 失败：${e.message}，改 removeView")
-            try {
-                wm?.removeView(r)
-                if (!r.isAttachedToWindow) {
-                    AppLog.d("悬浮棋盘", "hide() 已移除（removeView 兜底）")
-                    removed = true
-                } else {
-                    AppLog.e("悬浮棋盘", "hide() removeView 后 view 还贴着，保留引用等重试")
-                }
-            } catch (e2: Exception) {
-                AppLog.e("悬浮棋盘", "hide() removeView 也失败：${e2.message}，保留引用等下次重试")
-            }
-        }
-        if (removed) {
-            // 0.84：顺带扫掉登记表里的孤儿（旧版留下的），免得“已移除”了小窗还在。
-            wm?.let { sweepStaleViews(it) }
-            // 0.99：登记表里没有的孤儿按 tag 扫 mViews 清掉——114 局就是它留在屏幕上。
-            wm?.let { removeTaggedOverlays(it) }
-            // 1.00：0.99 之前的孤儿没打 tag，按内容再清一遍。
-            wm?.let { removeOrphanBoardsByContent(it) }
-            // 0.95：把刚摘的这个也从登记表里清掉（以前 sweep 会跳过 root，它一直赖在表里）。
-            synchronized(allViews) { allViews.remove(r) }
-            // 0.93：800ms 后再复查一遍——hide() 的“已移除”在 111 局被截图证伪了。
-            // 复查直接读 WindowManagerGlobal.mViews：小窗还在里面就再摘一次，并记日志定性。
-            val wmCaptured = wm
-            val viewCaptured = r
-            mainHandler.postDelayed({
-                try {
-                    val wmgClass = Class.forName("android.view.WindowManagerGlobal")
-                    val wmg = wmgClass.getDeclaredMethod("getInstance").invoke(null)
-                    val mViewsField = wmgClass.getDeclaredField("mViews").apply { isAccessible = true }
-                    @Suppress("UNCHECKED_CAST")
-                    val views = mViewsField.get(wmg) as ArrayList<View>
-                    if (views.any { it === viewCaptured }) {
-                        AppLog.w("悬浮棋盘", "hide() 800ms 后复查：小窗还在 WindowManager 里，再摘一次")
-                        try { wmCaptured?.removeViewImmediate(viewCaptured) } catch (_: Exception) { }
-                        if (!viewCaptured.isAttachedToWindow) AppLog.i("悬浮棋盘", "hide() 复查重摘成功")
-                        else AppLog.e("悬浮棋盘", "hide() 复查重摘后 view 还贴着（真·摘不掉）")
-                    } else {
-                        AppLog.d("悬浮棋盘", "hide() 800ms 后复查：小窗已不在，干净")
-                    }
-                } catch (e: Exception) {
-                    AppLog.e("悬浮棋盘", "hide() 复查失败：${e.message}")
-                }
-            }, 800)
-            root = null; wm = null; headerText = null; boardView = null
-            hideFailed = false
-            hideRetries = 0
-            // 0.85：摘完再查一遍 WindowManager，确认真的干净了。
-            dumpWmViews("hide摘完后")
-            // 0.86：收窗时把棋盘快照清掉——BoardView 是按 BoardOverlayState.latest 画的，
-            // 这份快照不随 view 一起消失；不清空的话，下局 show() 会立刻显示上局最后那块板，
-            // 在挑战页入口阶段看起来就像“小窗没收回去”（用户 2026-11-24 实证：99–102 局后
-            // 三张截图里小窗还挂在挑战页上，内容分别是上局的“等待识别”“野猪2只”“史莱姆6只”；
-            // 而 0.85 的 WM dump 已证实 view 本身每次都从 WindowManager 摘干净了——残留的不是
-            // view，是没清掉的快照状态）。清掉后下局开局显示“未运行”空盘，等 Runner 发新快照再填。
-            BoardOverlayState.post(BoardSnapshot())
-            AppLog.d("悬浮棋盘", "hide() 已清掉棋盘快照，下局开局为空盘")
-        } else {
-            // 移除失败：保留引用，下次 show()/hide() 会重试；同时 500ms 后再试一次，
-            // 免得只靠下次调用才收（用户看到的就是“结束了收不回去”）。最多再试 3 次，
-            // 再失败就认了（WindowManager 已坏，重试也没用），避免无限刷日志。
-            hideFailed = true
-            hideRetries++
-            if (hideRetries <= 3) {
-                mainHandler.postDelayed({ if (root != null) hide() }, 500)
-            } else {
-                AppLog.e("悬浮棋盘", "hide() 重试 3 次仍失败，放弃（view 可能已孤儿化）")
-            }
-        }
+        BoardOverlayState.post(BoardSnapshot())
+        AppLog.d("悬浮棋盘", "hide() 已隐藏棋盘窗（GONE，不摘除）")
+    }
+
+    /** 服务/应用退出时才真正摘窗。平时不调。 */
+    fun destroy() {
+        val r = root ?: return
+        try { wm?.removeViewImmediate(r) } catch (_: Exception) { }
+        root = null; wm = null; headerText = null; boardView = null
+        BoardOverlayState.removeListener(listener)
     }
 }

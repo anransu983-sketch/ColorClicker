@@ -297,6 +297,7 @@ class CaptureService : Service() {
         handler.removeCallbacksAndMessages(null)   // 销毁后不再跑取色的延时任务
         AppLog.i("截图", "截屏服务已停止")
         Runner.stop()
+        BoardOverlay.destroy()   // 1.02：服务停时才真正摘掉棋盘窗（平时 hide() 只 GONE）
         try {
             picker?.let { wm.removeView(it) }; picker = null
             overlay?.let { wm.removeView(it) }; overlay = null
