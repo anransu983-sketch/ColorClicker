@@ -308,7 +308,10 @@ object BoardOverlay {
             WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY,
             WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE or WindowManager.LayoutParams.FLAG_LAYOUT_NO_LIMITS,
             PixelFormat.TRANSLUCENT
-        ).apply { gravity = Gravity.TOP or Gravity.START; x = 20; y = 60 }
+        // 0.94：默认放顶部居中——用户 2026-11-24：左上角（x=20）挡住左上角分数了。
+        // 原来每局 show() 都重置回 x=20，拖走也没用，下局又挡回来。改居中后默认不挡分数，
+        // 仍可按标题拖动（拖动逻辑不变，x 变成相对中心点的偏移）。
+        ).apply { gravity = Gravity.TOP or Gravity.CENTER_HORIZONTAL; x = 0; y = 60 }
         // 拖动：按住标题文字拖整个窗（关闭按钮仍可点）
         var dx = 0f; var dy = 0f; var sx = 0; var sy = 0; var moved = false
         header.setOnTouchListener { _, e ->
