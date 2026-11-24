@@ -36,13 +36,18 @@ package com.example.colorclicker
  * 下轮最大一伙来自已存活的格子；新刷的怪未知，两边都不算，所以不用折扣。
  */
 object Solver {
-    /** 0.82 敢点大伙：撤掉 0.72 的定型延后。
-     *  0.72 的定型过滤让求解器只在“已定型”（不碰最下排）的伙里挑，把还长着的大伙一让再让，
-     *  88 局实证：期限规则指着土豆 11 只、蝎子 19 只，求解器却改去点史莱姆 1 只、土豆 1 只，
-     *  场均只清 3.7 只、盘净增 2.3 只/次，十几二十次灌满即死。
-     *  仿真 19 策略×400 局：去定型（K）19.2 轮/529 分 vs 有定型（M）14.4 轮/377 分，是最大的单杠杆。
-     *  仿真刷怪均匀随机、复现不了真机单种怪占盘，定型在真机的价值可能被低估——但用户 2026-11-24
-     *  拍板“改呀”，先撤掉看真机。安全子集（hz>=1）与墙压×2（pressureScore）不动，只撤定型。 */
+    /** 0.89 定型过滤回归（0.72 的机制）＋墙压分优先（0.85 的排序）。
+     *  Claude 2026-11-24 结论（score-105 简报后）：靠换排序键撑不到 40 施法；
+     *  模拟器里唯一有用的机制就是延后还在长的伙（0.72 的 settled 过滤）——
+     *  碰最下排的伙留着长大、先点已定型的伙。3 种怪、同排成串概率 0.3 时，
+     *  安全子集内按这条规则平均多活 28%（10.0→12.8 施法）。真机方向一致：
+     *  0.75（带 settled）3.93 只/次、17.5 施法是最好的一档；0.82 去掉后 3.44、
+     *  0.85 为 3.74。但每档只有 3–4 局，只能算旁证；且 Claude 模拟器有个错误
+     *  前提（假设怪无重力、洞不补，0.73 已证实下落），百分比只当方向。
+     *  本版 = 安全子集 → settled 子集（maxRow < 6，不碰最下排的伙；无则回落全量）
+     *  → 墙压分优先。单变量：相对 0.88 只加回 settled 过滤。0.88 未单独交付，
+     *  直接由本版取代。 */
+    private const val BOTTOM_ROW = 6
 
     data class Eval(
         val ruleName: String,
@@ -91,12 +96,12 @@ object Solver {
             safe.isNotEmpty() -> safe
             else -> evals.filter { it.hz != -1 }.ifEmpty { evals }
         }
-        // 0.88 回到 0.85 的墙压分优先：0.86 的只数优先真机三局（103–105）场均
-        // 12.33 施法/42.33 只/3.44 只/次，低于 0.85 的 99–102 四局（16.75/62.75/3.74）。
-        // 改点确实在点大伙（3>2、5>2、6>1），但局更短：只数优先不管墙压，墙区更快
-        // 饱和，终局复盘全是“点完即越线”。墙压分（两步 - 2×墙压）同时看确定的只数
-        // 与下一盘的墙压，是目前真机最好的排序。安全子集（hz>=1）不动。
-        return pool.sortedWith(
+        // 0.89 定型过滤：pool 里先取 maxRow < BOTTOM_ROW(6) 的 settled 子集
+        //（不碰最下排的伙＝已定型，不会再被新刷接长），无则回落全量。
+        // 墙压分优先（0.85 的排序）不动。0.86 只数优先的教训：不管墙压局更短。
+        val settled = pool.filter { BoardMemory.maxRowOf(it.comp) < BOTTOM_ROW }
+        val finalPool = if (settled.isNotEmpty()) settled else pool
+        return finalPool.sortedWith(
             compareByDescending<Eval> { it.pressureScore }
                 .thenByDescending { it.comp.size }
                 .thenBy { BoardMemory.minRowOf(it.comp) }
