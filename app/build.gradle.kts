@@ -13,8 +13,13 @@ android {
         applicationId = "com.example.colorclicker"
         minSdk = 30
         targetSdk = 34
-        versionCode = 87
-        versionName = "0.86"
+        versionCode = 88
+        versionName = "0.87"
+        // 0.87 瘦身：只打包 arm64-v8a。OpenCV 的 libopencv_java4.so 自带 4 个 ABI
+        //（x86_64 54MB＋x86 40MB＋arm64 20MB＋armeabi-v7a 14MB≈129MB，占包体 82%），
+        // 而用户手机是 S26 Ultra（arm64），其余 3 个 ABI 永远用不上、白白占 111MB。
+        // 只留 arm64 后包体 157MB→约 46MB。libc++_shared 等同理只留 arm64 一份。
+        ndk { abiFilters.add("arm64-v8a") }
     }
     // 固定签名：signing.properties（本机）或 CI secret 解出的同名文件提供密码，
     // keystore 在 ~/workspace/keys/colorclicker-release.keystore（不进仓库）。
