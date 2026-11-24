@@ -57,8 +57,8 @@ object GuardScript {
     fun stop() {
         if (isRunning()) AppLog.i("守卫", "一键守卫已停止")
         job?.cancel(); job = null
-        // 0.70：一局结束自动收回关闭悬浮棋盘（Runner 还在跑就不收，棋盘还得显示）
-        if (!Runner.isRunning()) BoardOverlay.hide()
+        // 1.04：一局结束停看屏协程＋收窗（Runner 还在跑就不收，棋盘还得显示）
+        if (!Runner.isRunning()) FloatBoard.stopWatching()
     }
 
     private fun assetBitmap(ctx: Context, asset: String): Bitmap? {
@@ -196,20 +196,9 @@ object GuardScript {
                 if (tappedAssist) {
                     if (Runner.startBattle(ctx)) {
                         AppLog.i("守卫", "已开跑，守卫脚本交棒给消消乐，等本局打完")
-                        // 1.03：战斗中每秒看一眼屏幕是不是已离开游戏（挑战页/结算屏），是就立马收悬浮棋盘，
-                        // 不等 Runner 下一轮扫描——Runner 点后等上移能拖约 10 秒，这段时间屏早回了挑战页、
-                        // 小窗还挂着（用户 11:37:53/11:38:47/11:39:55 三张截图 EXIF 实证，都是末点后 3–6 秒、
-                        // 零轮扫描之前拍的）。挑战页开始按钮和结算标题在战斗中不可能出现，不会误收；
-                        // 真误收了 Runner 下一轮找到怪也会自己重新打开。
-                        while (isActive && Runner.isRunning()) {
-                            val f = ScreenGrabber.grab()
-                            if (f != null) {
-                                val back = Matcher.findImage(f, tplStart, 0.8, listOf(900, 550, 540, 400)) != null
-                                val settled = tplEnd != null && Matcher.findImage(f, tplEnd, 0.75, null) != null
-                                if (back || settled) BoardOverlay.hide()
-                            }
-                            delay(1000)
-                        }
+                        // 1.04：只等 Runner 停下。显隐归新悬浮棋盘的看屏协程管（每 500ms 看屏幕，
+                        // 挑战页/结算屏一出现就收窗），这里不再调显隐。
+                        while (isActive && Runner.isRunning()) delay(1000)
                         // 0.36 自裁标题图：第 22 局回退 0/0/0——包里的标题图（00:27 结算截图
                         // 裁的、放大回原生）5 轮都没对上。原因未定（放大模糊、那局结算屏长得
                         // 不一样都有可能），但现成帧就在手里：回挑战页之前先从当前帧按结算
@@ -259,14 +248,11 @@ object GuardScript {
                         var tries = 0
                         while (isActive && tries < 5) {
                             delay(1500)
-                            // 0.98：已回到挑战页也算战斗结束，立马收小窗——之前只在认到结算屏那条分支收，
-                            // isBack() 先为真就直接 break，onSettle() 一次都没跑，收窗根本没触发。
-                            if (isBack()) { BoardOverlay.hide(); back = true; break }
+                            // 1.04：已回到挑战页，战斗结束。收窗归新悬浮棋盘的看屏协程（Runner 停机时
+                            // 已停看屏＋收窗），这里不再调显隐。
+                            if (isBack()) { back = true; break }
                             if (!onSettle()) { tries++; continue }
-                            // 0.96：认到结算屏就立马收小窗——用户 2026-11-24 要求加个识别，战斗结束悬浮棋盘立马关掉。
-                            // 这是第二道触发（第一道是 Runner 空轮 hide），结算屏一出现就收，不等 Runner 那边的状态。
-                            // 0.95 的缩 0x0 已在 hide() 里，认到就收等于立马消失。
-                            BoardOverlay.hide()
+                            // 1.04：认到结算屏，战斗结束。收窗已由看屏协程处理，这里只管退出流程。
                             AppLog.i("守卫", "认到战斗结束，按返回键退出")
                             ClickService.back(); backs++
                             delay(1200)

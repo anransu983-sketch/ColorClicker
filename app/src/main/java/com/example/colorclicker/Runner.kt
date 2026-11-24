@@ -137,8 +137,8 @@ object Runner {
     fun stop() {
         if (isRunning()) AppLog.i("服务", "运行已停止")
         job?.cancel(); job = null
-        BoardOverlayState.post(BoardSnapshot(running = false))   // 0.67：悬浮棋盘显示“未运行”
-        BoardOverlay.hide()   // 0.70：一局结束自动收回关闭悬浮棋盘
+        FloatBoardState.post(FloatSnapshot(running = false))   // 1.04：新悬浮棋盘显示“未运行”
+        FloatBoard.stopWatching()   // 1.04：停看屏协程＋收窗，显隐只归看屏管
     }
 
     private fun cacheKey(path: String) = path + "#" + File(path).lastModified()
@@ -254,10 +254,9 @@ object Runner {
 
     private fun start(ctx: Context, maxClicks: Int) {
         job = CoroutineScope(Dispatchers.Default).launch {
-            // 0.92：悬浮棋盘改由 Runner 开跑时打开（原来 GuardScript 一开就打开，进场/挑战页阶段
-            // 就顶着上局棋盘挂在挑战页上，用户 2026-11-24 截图实证）。只在战斗进行中显示；
-            // 战斗结束由 0.90/0.91 收窗+停机。开跑时棋盘还没扫到，先显示“等待识别”空盘。
-            withContext(Dispatchers.Main) { BoardOverlay.show(ctx) }
+            // 1.04：新悬浮棋盘由 Runner 开跑时启动看屏协程——显隐只由看屏决定（每 500ms 看屏幕，
+            // 挑战页/结算屏一出现就收窗），Runner 再也不调显隐。开跑时棋盘还没扫到，先显示“等待识别”空盘。
+            FloatBoard.startWatching(ctx)
             val rules = RuleStore.load(ctx).filter { it.enabled }
             val clusterRules = rules.filter { it.type != "color" && it.clusterFirst }
             val normalRules = rules - clusterRules.toSet()
@@ -279,7 +278,6 @@ object Runner {
             // 小窗一直顶在挑战页上。0.91 再进一步：空轮即停机退出，不必等 25 秒（见下 else 分支）。
             // 换波从不产生空轮（108 局实证），空轮只出现在战斗结束时；且须已点过至少一次（lastTapAt>0），
             // 防止开局棋盘还没加载出来就误停。万一是新一波晚到，下一轮点到怪就重新打开悬浮窗。 */
-            var overlayHiddenForZero = false
             try {
             while (isActive) {
                 var frame = ScreenGrabber.grab()
@@ -343,19 +341,8 @@ object Runner {
                 }
                 if (acted) {
                     lastActAt = System.currentTimeMillis()
-                    if (overlayHiddenForZero && !BoardOverlay.isShowing()) {
-                        overlayHiddenForZero = false
-                        withContext(Dispatchers.Main) { BoardOverlay.show(ctx) }
-                        AppLog.i("悬浮棋盘", "棋盘上又有怪了，重新打开悬浮棋盘")
-                    }
                 } else {
-                    // 0.90：这一轮没找到怪就先收窗，不等 25 秒停机。滑动/半截帧/点前复核的 continue
-                    // 不进这里（怪还在），所以到这里就是整盘真没找到怪。
-                    if (!overlayHiddenForZero) {
-                        overlayHiddenForZero = true
-                        BoardOverlay.hide()
-                        AppLog.i("悬浮棋盘", "这一轮没找到怪，先收起悬浮棋盘")
-                    }
+                    // 1.04：空轮不再由 Runner 收窗（看屏协程每 500ms 看屏幕，挑战页/结算屏出现就收）。
                     // 0.91：已点过至少一次，棋盘空了就是战斗结束，立即停机退出，不必等 25 秒。
                     // 停机后 GuardScript 的退出流程（认结算→回挑战页）随即启动。没点过一次时不走这条
                     // （开局棋盘可能还没加载），仍走下面的 25 秒兜底。
@@ -373,8 +360,8 @@ object Runner {
             } finally {
                 deathReport()
                 BoardMemory.endBattle(ctx)
-                BoardOverlayState.post(BoardSnapshot(running = false))   // 0.67：悬浮棋盘显示“未运行”
-                BoardOverlay.hide()   // 0.70：一局结束自动收回关闭悬浮棋盘
+                FloatBoardState.post(FloatSnapshot(running = false))   // 1.04：新悬浮棋盘显示“未运行”
+                FloatBoard.stopWatching()   // 1.04：停看屏协程＋收窗
             }
         }
     }
@@ -704,7 +691,7 @@ object Runner {
         if (all.isEmpty()) {
             AppLog.d("匹配", "$summary → 都没找到$verified")
             BoardMemory.onZeroBoard()   // 0.45：整盘全零（清完这一波 / 结算屏），待确认的点击按已发生算
-            BoardOverlayState.post(BoardSnapshot(running = true))   // 0.67：悬浮棋盘清盘
+            FloatBoardState.post(FloatSnapshot(running = true))   // 1.04：新悬浮棋盘清盘
             // 点过之后第一次整盘全零：要么这一波清完了，要么战斗结束。存一张整屏图当凭证（每局最多 3 张）
             if (!zeroShotDone && lastTapAt > 0 && zeroShots < 3) {
                 zeroShotDone = true; zeroShots++
@@ -921,12 +908,12 @@ object Runner {
         rememberRound(evs, pick, frame)
         val near = scans.flatMap { s -> s.near.map { s.rule.name to it } }
         BoardMemory.onRound(compsAll, pick.comp, pick.rule.name, frame, near, diagTpls)?.let { AppLog.d("记忆", it) }
-        // 0.67 悬浮迷你棋盘：每轮把认到的棋盘＋要点的伙发给悬浮窗（只显示，不改决策）。
-        BoardOverlayState.post(
-            BoardSnapshot(
+        // 1.04 悬浮迷你棋盘：每轮把认到的棋盘＋要点的伙发给新悬浮窗（只显示，不改决策）。
+        FloatBoardState.post(
+            FloatSnapshot(
                 cells = all.flatMap { cand ->
                     cand.comp.cells.ifEmpty { listOf(cand.comp.point) }.map { p ->
-                        BoardCell(colOf(p.x), rowOf(p.y), cand.rule.name)
+                        FloatCell(colOf(p.x), rowOf(p.y), cand.rule.name)
                     }
                 },
                 pickCells = pick.comp.cells.ifEmpty { listOf(pick.comp.point) }

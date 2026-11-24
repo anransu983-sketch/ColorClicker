@@ -20,37 +20,55 @@ import android.view.WindowManager
 import android.widget.Button
 import android.widget.LinearLayout
 import android.widget.TextView
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.isActive
+import kotlinx.coroutines.launch
 import kotlin.math.abs
 
-/** 悬浮迷你棋盘（0.67）：仿 PC 辅助 3.0 的棋盘窗——实时显示 bot 认到的棋盘，红叉标出这轮要点的伙。
- *  只显示、不改决策；Runner 每轮发一次快照。注意：悬浮窗会出现在截屏里，默认放在左上角墙上（棋盘区域 y<1100 之外），
- *  别拖到棋盘上，否则 bot 会把小窗当成怪、识别全乱。 */
-data class BoardCell(val col: Int, val row: Int, val type: String)
+/** 全新悬浮棋盘（1.04）：删掉 BoardOverlay.kt 重写。
+ *
+ * 旧板的问题不在窗口本身（1.02 的单窗＋GONE 经日志和 dump 证实不留孤儿），
+ * 在显隐的控制权散在六处（Runner 开跑/空轮/停机、GuardScript 退场、手动开关各调一次 show/hide），
+ * 跟屏幕实际状态不同步：末点后屏 5 秒就回挑战页，Runner 点后等上移拖约 10 秒才扫到零轮收窗，
+ * 这段时间小窗就挂在挑战页上（用户 2026-11-24 11:37:53/11:38:47/11:39:55 三张截图 EXIF 实证）。
+ * 1.03 只在 GuardScript 里又加了一处 hide，还是“多处调显隐”的老路子，用户要求删旧做新。
+ *
+ * 新设计只有一处能决定显隐：FloatBoard 内部的看屏协程。
+ * 战斗中每 500ms 抓一帧看屏幕——挑战页开始按钮或结算标题一出现就收窗，
+ * 否则（还在游戏棋盘上）就显示。Runner 只管发快照（内容），再也不调显隐；
+ * GuardScript、手动开关也不调显隐。显隐 = 当前屏幕状态的函数，每半秒重算一次，
+ * 不存在“某处忘了调 hide”这回事。
+ * 窗口本身仍只建一次、GONE 隐藏、服务退出才摘除（这套窗体不留孤儿，已证实）。 */
+data class FloatCell(val col: Int, val row: Int, val type: String)
 
-data class BoardSnapshot(
-    val cells: List<BoardCell> = emptyList(),
+data class FloatSnapshot(
+    val cells: List<FloatCell> = emptyList(),
     val pickCells: Set<Pair<Int, Int>> = emptySet(),
     val pickName: String = "",
     val pickCount: Int = 0,
     val running: Boolean = false,
 )
 
-/** Runner → 悬浮窗的单向快照通道（最新一条为准）。 */
-object BoardOverlayState {
-    @Volatile var latest: BoardSnapshot = BoardSnapshot()
-    private val listeners = mutableSetOf<(BoardSnapshot) -> Unit>()
+/** Runner → 悬浮窗的单向快照通道（最新一条为准，只传内容，不管显隐）。 */
+object FloatBoardState {
+    @Volatile var latest: FloatSnapshot = FloatSnapshot()
+    private val listeners = mutableSetOf<(FloatSnapshot) -> Unit>()
     private val mainHandler = Handler(Looper.getMainLooper())
-    fun post(snap: BoardSnapshot) {
+    fun post(snap: FloatSnapshot) {
         latest = snap
         val copy = synchronized(listeners) { listeners.toList() }
         if (copy.isEmpty()) return
         mainHandler.post { copy.forEach { it(snap) } }
     }
-    fun addListener(l: (BoardSnapshot) -> Unit) { synchronized(listeners) { listeners.add(l) } }
-    fun removeListener(l: (BoardSnapshot) -> Unit) { synchronized(listeners) { listeners.remove(l) } }
+    fun addListener(l: (FloatSnapshot) -> Unit) { synchronized(listeners) { listeners.add(l) } }
+    fun removeListener(l: (FloatSnapshot) -> Unit) { synchronized(listeners) { listeners.remove(l) } }
 }
 
-private fun boardColorOf(type: String): Int = when {
+private fun floatColorOf(type: String): Int = when {
     "土豆" in type -> 0xFFA9713A.toInt()
     "史莱姆" in type -> 0xFF3E7CB1.toInt()
     "蝎子" in type -> 0xFFD97B29.toInt()
@@ -63,7 +81,7 @@ private fun boardColorOf(type: String): Int = when {
     else -> 0xFF888888.toInt()
 }
 
-private fun boardLabelOf(type: String): String = when {
+private fun floatLabelOf(type: String): String = when {
     "土豆" in type -> "土"
     "史莱姆" in type -> "史"
     "蝎子" in type -> "蝎"
@@ -76,8 +94,8 @@ private fun boardLabelOf(type: String): String = when {
     else -> "？"
 }
 
-/** 迷你棋盘：6 列 × 8 排（-1..6 排），彩格＋首字＋红叉标目标伙；-1 排与 0 排之间画一道墙线。 */
-class BoardView(ctx: Context) : View(ctx) {
+/** 迷你棋盘：6 列 × 8 排（-1..6 排），彩格＋怪图/首字＋红叉标目标伙；-1 排与 0 排之间画一道墙线。 */
+class FloatBoardView(ctx: Context) : View(ctx) {
     private val cellDp = 32f
     private val cellPx get() = TypedValue.applyDimension(TypedValue.COMPLEX_UNIT_DIP, cellDp, resources.displayMetrics)
     private val rows = -1..6
@@ -99,7 +117,6 @@ class BoardView(ctx: Context) : View(ctx) {
     private val bitmapPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply { isFilterBitmap = true }
     private val tplCache = HashMap<String, Bitmap?>()
 
-    /** 怪的模板图（assets 里 9 张都有）：按类型取，解一次后缓存；读不到返回 null（画首字兜底）。 */
     private fun tplFor(type: String): Bitmap? {
         val asset = when {
             "土豆" in type -> "tpl_potato.png"
@@ -124,9 +141,9 @@ class BoardView(ctx: Context) : View(ctx) {
     }
 
     override fun onDraw(canvas: Canvas) {
-        val snap = BoardOverlayState.latest
+        val snap = FloatBoardState.latest
         val c = cellPx
-        val byCell = HashMap<Pair<Int, Int>, BoardCell>()
+        val byCell = HashMap<Pair<Int, Int>, FloatCell>()
         for (cell in snap.cells) {
             if (cell.row in rows && cell.col in 0..5) byCell[Pair(cell.col, cell.row)] = cell
         }
@@ -137,9 +154,8 @@ class BoardView(ctx: Context) : View(ctx) {
                 val top = (r - rows.first) * c
                 val cell = byCell[Pair(col, r)]
                 if (cell != null) {
-                    var color = boardColorOf(cell.type)
+                    var color = floatColorOf(cell.type)
                     if (r == -1) {
-                        // -1 排在墙后，压暗 30%
                         color = Color.rgb(
                             (Color.red(color) * 0.7f).toInt(),
                             (Color.green(color) * 0.7f).toInt(),
@@ -149,7 +165,6 @@ class BoardView(ctx: Context) : View(ctx) {
                     fillPaint.style = Paint.Style.FILL
                     fillPaint.color = color
                     canvas.drawRoundRect(RectF(left + 2f, top + 2f, left + c - 2f, top + c - 2f), 8f, 8f, fillPaint)
-                    // 0.68：有模板就画怪的图（按原比例缩进格里、彩框留边），没模板才退回首字
                     val tpl = tplFor(cell.type)
                     if (tpl != null) {
                         val inset = c * 0.08f
@@ -161,7 +176,7 @@ class BoardView(ctx: Context) : View(ctx) {
                         val dst = RectF(left + (c - dw) / 2, top + (c - dh) / 2, left + (c - dw) / 2 + dw, top + (c - dh) / 2 + dh)
                         canvas.drawBitmap(tpl, null, dst, bitmapPaint)
                     } else {
-                        canvas.drawText(boardLabelOf(cell.type), left + c / 2, top + c / 2 + textPaint.textSize * 0.35f, textPaint)
+                        canvas.drawText(floatLabelOf(cell.type), left + c / 2, top + c / 2 + textPaint.textSize * 0.35f, textPaint)
                     }
                 } else {
                     fillPaint.style = Paint.Style.FILL
@@ -176,7 +191,6 @@ class BoardView(ctx: Context) : View(ctx) {
                 }
             }
         }
-        // 墙线：-1 排与 0 排之间
         wallPaint.strokeWidth = c * 0.08f
         val wallY = (0 - rows.first) * c
         canvas.drawLine(0f, wallY, width.toFloat(), wallY, wallPaint)
@@ -187,99 +201,127 @@ class BoardView(ctx: Context) : View(ctx) {
     }
 }
 
-/** 悬浮窗管理：1.02 重做——窗口只建一次、永不摘除，显示/隐藏只改 visibility。
- * 旧版每局 addView/removeView，removeViewImmediate 静默失败就留孤儿，
- * 0.93–1.01 补了三层清扫都没根治（1.00 在 115 局仍留窗）。
- * 新设计从根上断掉孤儿：WindowManager 里永远只有一个棋盘窗，hide() 只是 GONE，
- * 不摘除就不存在“摘不掉”；旧孤儿只在第一次 show() 时清一次，之后再也不会产生。 */
-object BoardOverlay {
+/** 全新悬浮棋盘：窗口只建一次，显隐唯一由内部看屏协程决定。 */
+object FloatBoard {
     private var root: LinearLayout? = null
     private var wm: WindowManager? = null
     private var headerText: TextView? = null
-    private var boardView: BoardView? = null
+    private var boardView: FloatBoardView? = null
     private val mainHandler = Handler(Looper.getMainLooper())
-    private const val ROOT_TAG = "BoardOverlayRoot"
-    /** 旧孤儿只清一次（第一次 show 时），新设计不再产生孤儿，不用每局扫。 */
-    private var orphanCleaned = false
+    private val scope = CoroutineScope(Dispatchers.Default + SupervisorJob())
+    private var watchJob: Job? = null
+    /** 手动总开关（主页按钮 / 窗上的 ×）：关了看屏协程也不显示，开了才由看屏决定。默认开。 */
+    @Volatile private var enabled = true
+    private var tplStart: Bitmap? = null
+    private var tplEnd: Bitmap? = null
+    private var tickCount = 0
 
-    /** 棋盘窗的标题一定是“要点「X」N只”或“悬浮棋盘 · …”，工具栏没有这种文案，按这个认不会误伤。 */
-    private fun isBoardOverlayWindow(v: View): Boolean {
-        if (v is TextView) {
-            val t = v.text?.toString() ?: ""
-            if (t.startsWith("要点「") || t.startsWith("悬浮棋盘")) return true
-        }
-        if (v is ViewGroup) {
-            for (i in 0 until v.childCount) {
-                if (isBoardOverlayWindow(v.getChildAt(i))) return true
-            }
-        }
-        return false
-    }
-
-    /** 一次性清掉旧版留下的孤儿窗（按 tag 和按内容各扫一遍），只在第一次 show() 时跑。 */
-    private fun cleanOldOrphans(manager: WindowManager) {
-        var removed = 0
-        try {
-            val wmgClass = Class.forName("android.view.WindowManagerGlobal")
-            val wmg = wmgClass.getDeclaredMethod("getInstance").invoke(null)
-            val mViewsField = wmgClass.getDeclaredField("mViews").apply { isAccessible = true }
-            @Suppress("UNCHECKED_CAST")
-            val views = mViewsField.get(wmg) as ArrayList<View>
-            for (v in views.toList()) {
-                if (v === root) continue
-                if (!v.isAttachedToWindow) continue
-                if (v.tag != ROOT_TAG && !isBoardOverlayWindow(v)) continue
-                try {
-                    val mgr = v.context.getSystemService(Context.WINDOW_SERVICE) as? WindowManager ?: manager
-                    mgr.removeViewImmediate(v)
-                    if (!v.isAttachedToWindow) removed++
-                } catch (_: Exception) { }
-            }
-        } catch (e: Exception) {
-            AppLog.e("悬浮棋盘", "清旧孤儿失败：${e.message}")
-        }
-        if (removed > 0) AppLog.w("悬浮棋盘", "首次建窗清掉 $removed 个旧孤儿棋盘窗")
-    }
-
-    private val listener: (BoardSnapshot) -> Unit = { snap ->
+    private val listener: (FloatSnapshot) -> Unit = { snap ->
         headerText?.text = if (!snap.running) "悬浮棋盘 · 未运行"
         else if (snap.pickName.isEmpty()) "悬浮棋盘 · 等待识别"
         else "要点「${snap.pickName.removePrefix("守卫-")}」${snap.pickCount}只"
         boardView?.invalidate()
     }
 
+    fun isEnabled() = enabled
     fun isShowing() = root?.visibility == View.VISIBLE
 
-    fun show(ctx: Context): Boolean {
-        if (Looper.myLooper() != Looper.getMainLooper()) {
-            mainHandler.post { show(ctx) }
-            return true
-        }
-        val cur = root
-        if (cur != null) {
-            // 窗口已存在——只改成可见，不建新窗。旧版这里会另建一个，新旧叠加就是孤儿的来源。
-            if (cur.visibility != View.VISIBLE) {
-                cur.visibility = View.VISIBLE
-                cur.alpha = 1f
-                val lp = cur.layoutParams as? WindowManager.LayoutParams
-                if (lp != null && (lp.width == 0 || lp.height == 0)) {
-                    lp.width = WindowManager.LayoutParams.WRAP_CONTENT
-                    lp.height = WindowManager.LayoutParams.WRAP_CONTENT
-                    wm?.updateViewLayout(cur, lp)
-                }
-            }
-            BoardOverlayState.addListener(listener)
-            listener(BoardOverlayState.latest)
-            return true
-        }
+    /** 手动总开关。关 → 立刻收窗；开 → 看屏协程接手（战斗中才显示）。 */
+    fun setEnabled(on: Boolean) {
+        enabled = on
+        if (!on) hideWindow()
+    }
+
+    /** 开跑时调：建窗（没建过才建）＋启动看屏协程。任何线程可调，没悬浮窗权限返回 false。 */
+    fun startWatching(ctx: Context): Boolean {
         if (!Settings.canDrawOverlays(ctx)) return false
+        if (tplStart == null) {
+            tplStart = try { ctx.assets.open("tpl_guard_start.png").use { BitmapFactory.decodeStream(it) } } catch (_: Exception) { null }
+        }
+        if (tplEnd == null) {
+            tplEnd = try { ctx.assets.open("tpl_guard_end.png").use { BitmapFactory.decodeStream(it) } } catch (_: Exception) { null }
+        }
+        ensureWindow(ctx)
+        watchJob?.cancel()
+        tickCount = 0
+        watchJob = scope.launch {
+            while (isActive) {
+                watchTick()
+                delay(500)
+            }
+        }
+        return true
+    }
+
+    /** 停机时调：停看屏协程＋收窗。 */
+    fun stopWatching() {
+        watchJob?.cancel()
+        watchJob = null
+        hideWindow()
+    }
+
+    /** 服务退出时才真正摘窗。平时不调。 */
+    fun destroy() {
+        stopWatching()
+        val r = root ?: return
+        try { wm?.removeViewImmediate(r) } catch (_: Exception) { }
+        root = null; wm = null; headerText = null; boardView = null
+        FloatBoardState.removeListener(listener)
+    }
+
+    /** 看屏一拍：挑战页开始按钮或结算标题出现 → 屏已离开游戏，收窗；否则在游戏里，显示（开关开着才显示）。 */
+    private fun watchTick() {
+        val f = ScreenGrabber.grab() ?: return
+        val start = tplStart
+        val back = start != null && Matcher.findImage(f, start, 0.8, listOf(900, 550, 540, 400)) != null
+        if (back) {
+            hideWindow()
+            return
+        }
+        tickCount++
+        // 结算标题全屏匹配贵，每 4 拍（约 2 秒）查一次就够；挑战页按钮每拍都查，收窗的主力是它。
+        if (tickCount % 4 == 0) {
+            val end = tplEnd
+            val settled = end != null && Matcher.findImage(f, end, 0.75, null) != null
+            if (settled) {
+                hideWindow()
+                return
+            }
+        }
+        if (enabled) showWindow()
+    }
+
+    private fun showWindow() {
+        if (Looper.myLooper() != Looper.getMainLooper()) {
+            mainHandler.post { showWindow() }
+            return
+        }
+        val r = root ?: return
+        if (r.visibility != View.VISIBLE) {
+            r.visibility = View.VISIBLE
+            r.alpha = 1f
+        }
+    }
+
+    private fun hideWindow() {
+        if (Looper.myLooper() != Looper.getMainLooper()) {
+            mainHandler.post { hideWindow() }
+            return
+        }
+        val r = root ?: return
+        if (r.visibility != View.GONE) r.visibility = View.GONE
+    }
+
+    /** 只建一次的唯一棋盘窗（顶部居中 y=60，标题栏可拖动，× 为手动总开关）。 */
+    private fun ensureWindow(ctx: Context) {
+        if (root != null) return
+        if (Looper.myLooper() != Looper.getMainLooper()) {
+            mainHandler.post { ensureWindow(ctx) }
+            return
+        }
+        if (root != null) return
         val appCtx = ctx.applicationContext
         val manager = appCtx.getSystemService(Context.WINDOW_SERVICE) as WindowManager
-        // 第一次建窗：先把旧版留下的孤儿清掉，再建自己的唯一一个窗。
-        if (!orphanCleaned) {
-            orphanCleaned = true
-            cleanOldOrphans(manager)
-        }
         val header = TextView(appCtx).apply {
             text = "悬浮棋盘 · 未运行"
             setTextColor(Color.WHITE)
@@ -290,7 +332,7 @@ object BoardOverlay {
             text = "×"
             setTextColor(Color.WHITE)
             setBackgroundColor(Color.TRANSPARENT)
-            setOnClickListener { hide() }
+            setOnClickListener { setEnabled(false) }
         }
         val headRow = LinearLayout(appCtx).apply {
             orientation = LinearLayout.HORIZONTAL
@@ -298,14 +340,13 @@ object BoardOverlay {
             addView(header, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f))
             addView(close, LinearLayout.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT))
         }
-        val board = BoardView(appCtx)
+        val board = FloatBoardView(appCtx)
         val rootView = LinearLayout(appCtx).apply {
             orientation = LinearLayout.VERTICAL
             setBackgroundColor(0xCC1A1512.toInt())
             addView(headRow)
             addView(board)
         }
-        rootView.tag = ROOT_TAG
         val params = WindowManager.LayoutParams(
             WindowManager.LayoutParams.WRAP_CONTENT, WindowManager.LayoutParams.WRAP_CONTENT,
             WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY,
@@ -329,31 +370,8 @@ object BoardOverlay {
         }
         manager.addView(rootView, params)
         root = rootView; wm = manager; headerText = header; boardView = board
-        BoardOverlayState.addListener(listener)
-        listener(BoardOverlayState.latest)
-        AppLog.d("悬浮棋盘", "show() 已建唯一棋盘窗（1.02 起只建一次）")
-        return true
-    }
-
-    fun hide() {
-        if (Looper.myLooper() != Looper.getMainLooper()) {
-            mainHandler.post { hide() }
-            return
-        }
-        val r = root ?: return
-        BoardOverlayState.removeListener(listener)
-        // 1.02：只设 GONE，不 removeView——窗口永不摘除，就不可能摘不掉、留孤儿。
-        // GONE 的 view 不画东西、不收触摸，屏幕上等于完全消失。
-        r.visibility = View.GONE
-        BoardOverlayState.post(BoardSnapshot())
-        AppLog.d("悬浮棋盘", "hide() 已隐藏棋盘窗（GONE，不摘除）")
-    }
-
-    /** 服务/应用退出时才真正摘窗。平时不调。 */
-    fun destroy() {
-        val r = root ?: return
-        try { wm?.removeViewImmediate(r) } catch (_: Exception) { }
-        root = null; wm = null; headerText = null; boardView = null
-        BoardOverlayState.removeListener(listener)
+        FloatBoardState.addListener(listener)
+        listener(FloatBoardState.latest)
+        AppLog.d("悬浮棋盘", "新悬浮棋盘已建窗（1.04，显隐只由看屏协程决定）")
     }
 }
