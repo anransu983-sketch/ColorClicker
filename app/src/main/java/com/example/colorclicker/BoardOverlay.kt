@@ -398,6 +398,14 @@ object BoardOverlay {
             hideRetries = 0
             // 0.85：摘完再查一遍 WindowManager，确认真的干净了。
             dumpWmViews("hide摘完后")
+            // 0.86：收窗时把棋盘快照清掉——BoardView 是按 BoardOverlayState.latest 画的，
+            // 这份快照不随 view 一起消失；不清空的话，下局 show() 会立刻显示上局最后那块板，
+            // 在挑战页入口阶段看起来就像“小窗没收回去”（用户 2026-11-24 实证：99–102 局后
+            // 三张截图里小窗还挂在挑战页上，内容分别是上局的“等待识别”“野猪2只”“史莱姆6只”；
+            // 而 0.85 的 WM dump 已证实 view 本身每次都从 WindowManager 摘干净了——残留的不是
+            // view，是没清掉的快照状态）。清掉后下局开局显示“未运行”空盘，等 Runner 发新快照再填。
+            BoardOverlayState.post(BoardSnapshot())
+            AppLog.d("悬浮棋盘", "hide() 已清掉棋盘快照，下局开局为空盘")
         } else {
             // 移除失败：保留引用，下次 show()/hide() 会重试；同时 500ms 后再试一次，
             // 免得只靠下次调用才收（用户看到的就是“结束了收不回去”）。最多再试 3 次，

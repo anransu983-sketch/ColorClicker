@@ -91,10 +91,15 @@ object Solver {
             safe.isNotEmpty() -> safe
             else -> evals.filter { it.hz != -1 }.ifEmpty { evals }
         }
-        // 0.82 撤定型延后：不再只在已定型的伙里挑，安全子集里直接按墙压分排，大伙不再被让。
+        // 0.86 只数优先：安全子集里先按本轮只数排，墙压分只作并列排序。
+        // 0.82 撤定型后 91–102 局十二局仍只有 3.5–3.7 只/次（99–102 四局 3.75），
+        // 日志里“改点”仍由 pressureScore 驱动：1 只（两步 8＋合群 9）压过 6 只、
+        // 4 只（两步 15）压过 11 只、5 只压过 8 只——两步值/合群是估算，twoStep 里
+        // 的 nextMax 常把小伙撑起来，反而把确定的大伙让掉。只数是本轮确定的清掉数，
+        // 先清最多的，墙压分退到并列时再看。安全子集（hz>=1）不动，不会点出必死的伙。
         return pool.sortedWith(
-            compareByDescending<Eval> { it.pressureScore }
-                .thenByDescending { it.comp.size }
+            compareByDescending<Eval> { it.comp.size }
+                .thenByDescending { it.pressureScore }
                 .thenBy { BoardMemory.minRowOf(it.comp) }
                 .thenByDescending { it.cluster }
                 .thenByDescending { it.comp.score }
