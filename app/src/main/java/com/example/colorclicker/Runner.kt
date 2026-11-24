@@ -272,9 +272,9 @@ object Runner {
             var lastActAt = System.currentTimeMillis()
             // 0.90：棋盘空了就先收悬浮窗，别等 Runner 25 秒停。用户 2026-11-24 指出小窗收得太慢：
             // 战斗结束（棋盘空了）后 Runner 还要等满 25 秒无怪才停、才收窗，106/107 局末点到收窗约 30 秒，
-            // 小窗一直顶在挑战页上。改法：某轮整盘没找到怪（acted==false，且不是滑动/半截帧/点前复核
-            // 的 continue——那几条路怪还在，不计），立刻收窗；Runner 照旧等 25 秒确认战斗结束才停，
-            // 万一是新一波晚到（实测换波不产生空轮），下一轮点到怪就重新打开。 */
+            // 小窗一直顶在挑战页上。0.91 再进一步：空轮即停机退出，不必等 25 秒（见下 else 分支）。
+            // 换波从不产生空轮（108 局实证），空轮只出现在战斗结束时；且须已点过至少一次（lastTapAt>0），
+            // 防止开局棋盘还没加载出来就误停。万一是新一波晚到，下一轮点到怪就重新打开悬浮窗。 */
             var overlayHiddenForZero = false
             try {
             while (isActive) {
@@ -350,7 +350,14 @@ object Runner {
                     if (!overlayHiddenForZero) {
                         overlayHiddenForZero = true
                         BoardOverlay.hide()
-                        AppLog.i("悬浮棋盘", "这一轮没找到怪，先收起悬浮棋盘（Runner 继续等 25 秒确认战斗结束）")
+                        AppLog.i("悬浮棋盘", "这一轮没找到怪，先收起悬浮棋盘")
+                    }
+                    // 0.91：已点过至少一次，棋盘空了就是战斗结束，立即停机退出，不必等 25 秒。
+                    // 停机后 GuardScript 的退出流程（认结算→回挑战页）随即启动。没点过一次时不走这条
+                    // （开局棋盘可能还没加载），仍走下面的 25 秒兜底。
+                    if (lastTapAt > 0) {
+                        AppLog.i("服务", "这一轮没找到怪，战斗已结束，立即停止")
+                        stop(); return@launch
                     }
                     if (System.currentTimeMillis() - lastActAt >= AUTO_STOP_IDLE_MS) {
                         AppLog.i("服务", "连续 ${AUTO_STOP_IDLE_MS / 1000} 秒没有可点的怪，自动停止")
