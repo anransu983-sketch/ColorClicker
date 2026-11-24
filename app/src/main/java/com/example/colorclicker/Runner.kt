@@ -254,6 +254,10 @@ object Runner {
 
     private fun start(ctx: Context, maxClicks: Int) {
         job = CoroutineScope(Dispatchers.Default).launch {
+            // 0.92：悬浮棋盘改由 Runner 开跑时打开（原来 GuardScript 一开就打开，进场/挑战页阶段
+            // 就顶着上局棋盘挂在挑战页上，用户 2026-11-24 截图实证）。只在战斗进行中显示；
+            // 战斗结束由 0.90/0.91 收窗+停机。开跑时棋盘还没扫到，先显示“等待识别”空盘。
+            withContext(Dispatchers.Main) { BoardOverlay.show(ctx) }
             val rules = RuleStore.load(ctx).filter { it.enabled }
             val clusterRules = rules.filter { it.type != "color" && it.clusterFirst }
             val normalRules = rules - clusterRules.toSet()

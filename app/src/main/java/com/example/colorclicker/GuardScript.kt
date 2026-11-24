@@ -46,8 +46,10 @@ object GuardScript {
             return false
         }
         start(ctx.applicationContext)
-        // 0.69：脚本一开就自动打开悬浮棋盘（还没开才开；没权限时 show() 直接返回 false，不跳授权页）
-        if (!BoardOverlay.isShowing()) BoardOverlay.show(ctx)
+        // 0.92：进场阶段不再打开悬浮棋盘——用户 2026-11-24 截图证实，0.91 战斗结束已立即收窗，
+        // 但一键守卫一开（进场/挑战页阶段）又把悬浮窗打开、顶着上局的棋盘挂在挑战页上，
+        // 看着就像“战斗结束了小窗还在”。悬浮棋盘改由 Runner 开跑时再打开（见 Runner.start），
+        // 只在战斗进行中显示，挑战页上永远不出现。
         Toast.makeText(ctx, "一键守卫开始：自动进场→点颜色辅助→开跑", Toast.LENGTH_SHORT).show()
         return true
     }
