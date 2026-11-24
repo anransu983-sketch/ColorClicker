@@ -229,6 +229,43 @@ object BoardOverlay {
         if (n > 0) AppLog.w("悬浮棋盘", "按 tag 清掉 $n 个 BoardOverlay 窗（含孤儿）")
         return n
     }
+
+    /** 1.00：按内容清掉无 tag 的旧孤儿——屏幕上现在那个就是 0.99 之前建的，根本没打 tag，
+     * 只按 tag 扫永远摸不到它。棋盘窗的标题一定是“要点「X」N只”或“悬浮棋盘 · …”，
+     * 工具栏没有这种文案，按这个认不会误伤。 */
+    private fun isBoardOverlayWindow(v: View): Boolean {
+        if (v is TextView) {
+            val t = v.text?.toString() ?: ""
+            if (t.startsWith("要点「") || t.startsWith("悬浮棋盘")) return true
+        }
+        if (v is ViewGroup) {
+            for (i in 0 until v.childCount) {
+                if (isBoardOverlayWindow(v.getChildAt(i))) return true
+            }
+        }
+        return false
+    }
+
+    private fun removeOrphanBoardsByContent(manager: WindowManager?): Int {
+        var n = 0
+        try {
+            val wmgClass = Class.forName("android.view.WindowManagerGlobal")
+            val wmg = wmgClass.getDeclaredMethod("getInstance").invoke(null)
+            val mViewsField = wmgClass.getDeclaredField("mViews").apply { isAccessible = true }
+            @Suppress("UNCHECKED_CAST")
+            val views = mViewsField.get(wmg) as ArrayList<View>
+            for (v in views.toList()) {
+                if (v !== root && v.isAttachedToWindow && isBoardOverlayWindow(v)) {
+                    try {
+                        manager?.removeViewImmediate(v)
+                        if (!v.isAttachedToWindow) n++
+                    } catch (_: Exception) { }
+                }
+            }
+        } catch (_: Exception) { }
+        if (n > 0) AppLog.w("悬浮棋盘", "按内容清掉 $n 个无 tag 的旧孤儿棋盘窗")
+        return n
+    }
     // 0.84：登记所有建过的悬浮窗 view，hide() 成功时顺带扫掉已脱离引用的孤儿——
     // 0.83 只能防新孤儿，已经孤儿化的旧 view（root 早被旧版置空）摸不到，
     // 只能靠启动新局/结束时扫一遍全量登记表才能清掉（用户 2026-11-24 08:09 截图：
@@ -360,6 +397,8 @@ object BoardOverlay {
         sweepStaleViews(manager)
         // 0.99：登记表里没有的孤儿（root 早被旧版置空）扫不到，按 tag 扫 mViews 再清一遍。
         removeTaggedOverlays(manager)
+        // 1.00：0.99 之前的孤儿没打 tag，按内容再清一遍（认标题“要点「X」N只”/“悬浮棋盘”）。
+        removeOrphanBoardsByContent(manager)
         manager.addView(rootView, params)
         root = rootView; wm = manager; headerText = header; boardView = board
         allViews.add(rootView)
@@ -450,6 +489,8 @@ object BoardOverlay {
             wm?.let { sweepStaleViews(it) }
             // 0.99：登记表里没有的孤儿按 tag 扫 mViews 清掉——114 局就是它留在屏幕上。
             wm?.let { removeTaggedOverlays(it) }
+            // 1.00：0.99 之前的孤儿没打 tag，按内容再清一遍。
+            wm?.let { removeOrphanBoardsByContent(it) }
             // 0.95：把刚摘的这个也从登记表里清掉（以前 sweep 会跳过 root，它一直赖在表里）。
             synchronized(allViews) { allViews.remove(r) }
             // 0.93：800ms 后再复查一遍——hide() 的“已移除”在 111 局被截图证伪了。
