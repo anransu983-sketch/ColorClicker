@@ -210,6 +210,10 @@ object FloatBoard {
     private val mainHandler = Handler(Looper.getMainLooper())
     private val scope = CoroutineScope(Dispatchers.Default + SupervisorJob())
     private var watchJob: Job? = null
+    /** 1.07：看屏协程是否在跑的闩。stopWatching() 先把它置 false 再取消协程，showWindow() 只认它——
+     *  1.06 只查 watchJob?.isActive，停机瞬间在途的一拍 watchTick 仍可能把窗顶回来（用户 2026-11-24：
+     *  战斗结束不立刻关，非要回挑战页才关）。 */
+    @Volatile private var watching = false
     /** 手动总开关（主页按钮 / 窗上的 ×）：关了看屏协程也不显示，开了才由看屏决定。默认开。 */
     @Volatile private var enabled = true
     private var tplStart: Bitmap? = null
@@ -244,6 +248,7 @@ object FloatBoard {
         ensureWindow(ctx)
         watchJob?.cancel()
         tickCount = 0
+        watching = true
         watchJob = scope.launch {
             while (isActive) {
                 watchTick()
@@ -253,8 +258,9 @@ object FloatBoard {
         return true
     }
 
-    /** 停机时调：停看屏协程＋收窗。 */
+    /** 停机时调：先落闩（在途的 watchTick 再也顶不回窗），再停看屏协程＋收窗。 */
     fun stopWatching() {
+        watching = false
         watchJob?.cancel()
         watchJob = null
         hideWindow()
@@ -280,8 +286,9 @@ object FloatBoard {
             return
         }
         tickCount++
-        // 结算标题全屏匹配贵，每 4 拍（约 2 秒）查一次就够；挑战页按钮每拍都查，收窗的主力是它。
-        if (tickCount % 4 == 0) {
+        // 1.07：结算标题每 2 拍（约 1 秒）查一次。Runner 停机是收窗的主力（stopWatching 落闩立即收），
+        // 这里只是兜底：万一 Runner 慢了半拍，结算屏出现 1 秒内也收，不等回挑战页。
+        if (tickCount % 2 == 0) {
             val end = tplEnd
             val settled = end != null && Matcher.findImage(f, end, 0.75, null) != null
             if (settled) {
@@ -293,8 +300,9 @@ object FloatBoard {
     }
 
     private fun showWindow() {
-        // 1.06：只在看屏协程还活着时才显示。停机瞬间若有一拍 watchTick 还在跑，它会在
-        // stopWatching 收窗之后又把窗顶回来，变孤儿；协程已取消就不再显示。
+        // 1.07：只认 watching 闩。停机瞬间在途的一拍 watchTick 若已越过检查、
+        // 在主线程真正改可见性前会再进一次这里，watching 已是 false，不再顶窗。
+        if (!watching) return
         if (watchJob?.isActive != true) return
         if (Looper.myLooper() != Looper.getMainLooper()) {
             mainHandler.post { showWindow() }
