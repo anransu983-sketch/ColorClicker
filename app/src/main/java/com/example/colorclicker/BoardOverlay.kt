@@ -365,11 +365,13 @@ object BoardOverlay {
         // 0.95：摘之前先把窗口缩成 0x0＋透明——112 局证实 removeViewImmediate＋GONE＋800ms 复查
         // 全套都说干净了，小窗还在挑战页上。缩窗不依赖摘除：就算 WindowManager 静默失败没摘掉，
         // 0x0 的窗口在屏幕上也是 0 像素、画不出东西，等于立马收掉，不用等。
+        // 0.97 修：不用 LayoutParams(lp) 拷贝构造（该构造在编译期解析不到），直接改现成的 lp 再 update。
         try {
             val lp = r.layoutParams as? WindowManager.LayoutParams
             if (lp != null) {
-                val shrunk = WindowManager.LayoutParams(lp).apply { width = 0; height = 0 }
-                wm?.updateViewLayout(r, shrunk)
+                lp.width = 0
+                lp.height = 0
+                wm?.updateViewLayout(r, lp)
             }
         } catch (_: Exception) { }
         r.alpha = 0f
