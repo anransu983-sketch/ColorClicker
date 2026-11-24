@@ -202,6 +202,27 @@ object BoardOverlay {
     private var hideFailed = false
     private var hideRetries = 0
     private val mainHandler = Handler(Looper.getMainLooper())
+    // 0.84：登记所有建过的悬浮窗 view，hide() 成功时顺带扫掉已脱离引用的孤儿——
+    // 0.83 只能防新孤儿，已经孤儿化的旧 view（root 早被旧版置空）摸不到，
+    // 只能靠启动新局/结束时扫一遍全量登记表才能清掉（用户 2026-11-24 08:09 截图：
+    // 0.83 下小窗仍挂在挑战页上，hide() 日志却写“已移除”——旧孤儿与新 view 不是同一个）。
+    private val allViews = mutableListOf<View>()
+
+    /** 扫掉登记表里所有“不是当前 root、还贴在窗口上”的 view（孤儿），顺带清掉已脱离的登记。 */
+    private fun sweepStaleViews(manager: WindowManager) {
+        var swept = 0
+        for (v in allViews.toList()) {
+            if (v == root) continue
+            if (!v.isAttachedToWindow) { allViews.remove(v); continue }
+            try {
+                manager.removeViewImmediate(v)
+                if (!v.isAttachedToWindow) { allViews.remove(v); swept++ }
+            } catch (_: Exception) {
+                // 摘不掉就留着，下次再扫
+            }
+        }
+        if (swept > 0) AppLog.w("悬浮棋盘", "sweep 清掉 $swept 个孤儿 view")
+    }
     private val listener: (BoardSnapshot) -> Unit = { snap ->
         headerText?.text = if (!snap.running) "悬浮棋盘 · 未运行"
         else if (snap.pickName.isEmpty()) "悬浮棋盘 · 等待识别"
@@ -280,8 +301,11 @@ object BoardOverlay {
             }
             true
         }
+        // 0.84：建新窗前先扫一遍登记表，把旧版留下的孤儿清掉（否则新旧叠在一起）。
+        sweepStaleViews(manager)
         manager.addView(rootView, params)
         root = rootView; wm = manager; headerText = header; boardView = board
+        allViews.add(rootView)
         BoardOverlayState.addListener(listener)
         listener(BoardOverlayState.latest)
         return true
@@ -339,6 +363,8 @@ object BoardOverlay {
             }
         }
         if (removed) {
+            // 0.84：顺带扫掉登记表里的孤儿（旧版留下的），免得“已移除”了小窗还在。
+            wm?.let { sweepStaleViews(it) }
             root = null; wm = null; headerText = null; boardView = null
             hideFailed = false
             hideRetries = 0
