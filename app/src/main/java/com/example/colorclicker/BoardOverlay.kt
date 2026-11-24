@@ -372,8 +372,13 @@ object BoardOverlay {
                 lp.width = 0
                 lp.height = 0
                 wm?.updateViewLayout(r, lp)
+                AppLog.d("悬浮棋盘", "hide() 已把窗口缩成 0x0（立马收）")
+            } else {
+                AppLog.w("悬浮棋盘", "hide() 缩窗失败：layoutParams 不是 WindowManager.LayoutParams")
             }
-        } catch (_: Exception) { }
+        } catch (e: Exception) {
+            AppLog.w("悬浮棋盘", "hide() 缩窗失败：${e.message}")
+        }
         r.alpha = 0f
         var removed = false
         try {

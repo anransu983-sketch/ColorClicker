@@ -246,7 +246,9 @@ object GuardScript {
                         var tries = 0
                         while (isActive && tries < 5) {
                             delay(1500)
-                            if (isBack()) { back = true; break }
+                            // 0.98：已回到挑战页也算战斗结束，立马收小窗——之前只在认到结算屏那条分支收，
+                            // isBack() 先为真就直接 break，onSettle() 一次都没跑，收窗根本没触发。
+                            if (isBack()) { BoardOverlay.hide(); back = true; break }
                             if (!onSettle()) { tries++; continue }
                             // 0.96：认到结算屏就立马收小窗——用户 2026-11-24 要求加个识别，战斗结束悬浮棋盘立马关掉。
                             // 这是第二道触发（第一道是 Runner 空轮 hide），结算屏一出现就收，不等 Runner 那边的状态。
