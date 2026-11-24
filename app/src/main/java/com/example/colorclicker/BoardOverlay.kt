@@ -202,6 +202,33 @@ object BoardOverlay {
     private var hideFailed = false
     private var hideRetries = 0
     private val mainHandler = Handler(Looper.getMainLooper())
+    // 0.99：给每个棋盘窗打 tag——114 局实证：hide() 的 dump 显示 mViews 里仍有 1 个
+    // LinearLayout 贴着（vis=0），而 800ms 复查却说 root 已不在（“干净”）——两者矛盾，
+    // 说明屏幕上的窗不是 root，是之前某局留下的孤儿，hide() 只摘 root 永远摸不到它。
+    // 按 tag 扫 mViews 才能把它清掉。
+    private const val ROOT_TAG = "BoardOverlayRoot"
+
+    /** 0.99：按 mViews 里的 tag 清掉所有 BoardOverlay 窗（含 root 之外的孤儿）。 */
+    private fun removeTaggedOverlays(manager: WindowManager?): Int {
+        var n = 0
+        try {
+            val wmgClass = Class.forName("android.view.WindowManagerGlobal")
+            val wmg = wmgClass.getDeclaredMethod("getInstance").invoke(null)
+            val mViewsField = wmgClass.getDeclaredField("mViews").apply { isAccessible = true }
+            @Suppress("UNCHECKED_CAST")
+            val views = mViewsField.get(wmg) as ArrayList<View>
+            for (v in views.toList()) {
+                if (v.tag == ROOT_TAG && v.isAttachedToWindow) {
+                    try {
+                        manager?.removeViewImmediate(v)
+                        if (!v.isAttachedToWindow) n++
+                    } catch (_: Exception) { }
+                }
+            }
+        } catch (_: Exception) { }
+        if (n > 0) AppLog.w("悬浮棋盘", "按 tag 清掉 $n 个 BoardOverlay 窗（含孤儿）")
+        return n
+    }
     // 0.84：登记所有建过的悬浮窗 view，hide() 成功时顺带扫掉已脱离引用的孤儿——
     // 0.83 只能防新孤儿，已经孤儿化的旧 view（root 早被旧版置空）摸不到，
     // 只能靠启动新局/结束时扫一遍全量登记表才能清掉（用户 2026-11-24 08:09 截图：
@@ -303,6 +330,7 @@ object BoardOverlay {
             addView(headRow)
             addView(board)
         }
+        rootView.tag = ROOT_TAG
         val params = WindowManager.LayoutParams(
             WindowManager.LayoutParams.WRAP_CONTENT, WindowManager.LayoutParams.WRAP_CONTENT,
             WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY,
@@ -330,6 +358,8 @@ object BoardOverlay {
         }
         // 0.84：建新窗前先扫一遍登记表，把旧版留下的孤儿清掉（否则新旧叠在一起）。
         sweepStaleViews(manager)
+        // 0.99：登记表里没有的孤儿（root 早被旧版置空）扫不到，按 tag 扫 mViews 再清一遍。
+        removeTaggedOverlays(manager)
         manager.addView(rootView, params)
         root = rootView; wm = manager; headerText = header; boardView = board
         allViews.add(rootView)
@@ -418,6 +448,8 @@ object BoardOverlay {
         if (removed) {
             // 0.84：顺带扫掉登记表里的孤儿（旧版留下的），免得“已移除”了小窗还在。
             wm?.let { sweepStaleViews(it) }
+            // 0.99：登记表里没有的孤儿按 tag 扫 mViews 清掉——114 局就是它留在屏幕上。
+            wm?.let { removeTaggedOverlays(it) }
             // 0.95：把刚摘的这个也从登记表里清掉（以前 sweep 会跳过 root，它一直赖在表里）。
             synchronized(allViews) { allViews.remove(r) }
             // 0.93：800ms 后再复查一遍——hide() 的“已移除”在 111 局被截图证伪了。
